@@ -43,22 +43,22 @@ function isAllowedTopic(ctx) {
 }
 
 // --- DEBUG: get thread id from ANY message
-bot.on("message", async (ctx) => {
-  const threadId = ctx.message?.message_thread_id ?? null;
-  const chatId = ctx.chat?.id ?? null;
-  const topic = threadId ? `topic thread_id=${threadId}` : "no topic thread_id";
+// bot.on("message", async (ctx) => {
+//   const threadId = ctx.message?.message_thread_id ?? null;
+//   const chatId = ctx.chat?.id ?? null;
+//   const topic = threadId ? `topic thread_id=${threadId}` : "no topic thread_id";
 
-  // отвечаем коротко, чтобы ты мог скопировать
-  await ctx.reply(`chat_id=${chatId}\n${topic}`);
+//   // отвечаем коротко, чтобы ты мог скопировать
+//   await ctx.reply(`chat_id=${chatId}\n${topic}`);
 
-  // и в логи Railway тоже
-  console.log("debug ids:", {
-    chatId,
-    threadId,
-    from: ctx.from?.username,
-    text: ctx.message?.text
-  });
-});
+//   // и в логи Railway тоже
+//   console.log("debug ids:", {
+//     chatId,
+//     threadId,
+//     from: ctx.from?.username,
+//     text: ctx.message?.text
+//   });
+// });
 
 // --- MAIN: photo handler (будет работать, но в debug-режиме ответит везде)
 bot.on("photo", async (ctx) => {
