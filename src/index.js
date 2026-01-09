@@ -2,22 +2,33 @@ import "dotenv/config";
 import { Telegraf, Markup } from "telegraf";
 import crypto from "crypto";
 import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
+
 import { extractTextFromImage } from "./ocr.js";
 import { findBook } from "./books.js";
 import { normalizeLines, shortText } from "./format.js";
 
+// --- GCP creds from Railway var (optional but handy)
+if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GCP_SA_JSON) {
+  const p = path.join("/tmp", "gcp-sa.json");
+  fs.writeFileSync(p, process.env.GCP_SA_JSON, "utf8");
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = p;
+}
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const ALLOWED_THREAD_ID = Number(process.env.ALLOWED_THREAD_ID);
+
+const ALLOWED_THREAD_ID = Number(process.env.ALLOWED_THREAD_ID || 0);
 const BOOKS_KEY = process.env.GOOGLE_BOOKS_API_KEY || "";
 
-const cache = new Map(); // для MVP, лучше заменить на Firestore/Redis
+const cache = new Map();
 
+// --- helper: download photo from Telegram
 async function downloadTelegramFile(ctx, fileId) {
   const link = await ctx.telegram.getFileLink(fileId);
   const res = await fetch(link.href);
   if (!res.ok) throw new Error("Failed to download file");
-  const buffer = Buffer.from(await res.arrayBuffer());
-  return buffer;
+  return Buffer.from(await res.arrayBuffer());
 }
 
 function sha256(buf) {
@@ -25,10 +36,31 @@ function sha256(buf) {
 }
 
 function isAllowedTopic(ctx) {
+  // if ALLOWED_THREAD_ID = 0, allow everything (debug mode)
+  if (!ALLOWED_THREAD_ID) return true;
   const threadId = ctx.message?.message_thread_id;
   return Number(threadId) === ALLOWED_THREAD_ID;
 }
 
+// --- DEBUG: get thread id from ANY message
+bot.on("message", async (ctx) => {
+  const threadId = ctx.message?.message_thread_id ?? null;
+  const chatId = ctx.chat?.id ?? null;
+  const topic = threadId ? `topic thread_id=${threadId}` : "no topic thread_id";
+
+  // отвечаем коротко, чтобы ты мог скопировать
+  await ctx.reply(`chat_id=${chatId}\n${topic}`);
+
+  // и в логи Railway тоже
+  console.log("debug ids:", {
+    chatId,
+    threadId,
+    from: ctx.from?.username,
+    text: ctx.message?.text
+  });
+});
+
+// --- MAIN: photo handler (будет работать, но в debug-режиме ответит везде)
 bot.on("photo", async (ctx) => {
   try {
     if (!isAllowedTopic(ctx)) return;
@@ -44,7 +76,6 @@ bot.on("photo", async (ctx) => {
       return;
     }
 
-    // 1) OCR
     const { text } = await extractTextFromImage(buffer, "TEXT");
     const candidates = normalizeLines(text);
 
@@ -56,7 +87,6 @@ bot.on("photo", async (ctx) => {
       return;
     }
 
-    // 2) Поиск по Google Books
     const results = [];
     for (const q of candidates) {
       const book = await findBook(q, BOOKS_KEY);
@@ -72,7 +102,6 @@ bot.on("photo", async (ctx) => {
       return;
     }
 
-    // 3) Формируем ответ
     let msg = "Нашёл так:\n\n";
     for (const r of results) {
       const title = r.book.title || r.query;
@@ -83,7 +112,7 @@ bot.on("photo", async (ctx) => {
       msg += "\n";
     }
 
-    const buttons = results.slice(0, 3).map(r => {
+    const buttons = results.slice(0, 3).map((r) => {
       const title = r.book.title || r.query;
       const url = r.book.canonicalLink || `https://www.google.com/search?q=${encodeURIComponent(title)}`;
       return [Markup.button.url(title.slice(0, 28), url)];
@@ -95,6 +124,7 @@ bot.on("photo", async (ctx) => {
 
     cache.set(hash, { text: msg.trim(), extra });
   } catch (e) {
+    console.error(e);
     await ctx.reply("Что-то пошло не так при обработке скрина. Попробуй еще раз.", {
       message_thread_id: ctx.message?.message_thread_id
     });
