@@ -23,6 +23,9 @@ const BOOKS_KEY = process.env.GOOGLE_BOOKS_API_KEY || "";
 
 const cache = new Map();
 
+let RAW_MODE = process.env.RAW_MODE === "1"; // можно включать через Railway переменную
+const MAX_TG_LEN = 3800; // безопасный лимит под Telegram
+
 // --- helper: download photo from Telegram
 async function downloadTelegramFile(ctx, fileId) {
   const link = await ctx.telegram.getFileLink(fileId);
@@ -42,6 +45,24 @@ function isAllowedTopic(ctx) {
   return Number(threadId) === ALLOWED_THREAD_ID;
 }
 
+bot.command("raw", async (ctx) => {
+  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
+
+  if (arg === "on" || arg === "1" || arg === "true") {
+    RAW_MODE = true;
+    await ctx.reply("Ок, буду присылать сырой OCR текст для каждого фото в этом чате.");
+    return;
+  }
+
+  if (arg === "off" || arg === "0" || arg === "false") {
+    RAW_MODE = false;
+    await ctx.reply("Ок, больше не присылаю сырой OCR текст.");
+    return;
+  }
+
+  await ctx.reply(`RAW_MODE сейчас: ${RAW_MODE ? "on" : "off"}\nКоманды: /raw on, /raw off`);
+});
+
 
 // --- MAIN: photo handler (будет работать, но в debug-режиме ответит везде)
 bot.on("photo", async (ctx) => {
@@ -54,12 +75,26 @@ bot.on("photo", async (ctx) => {
 
     const hash = sha256(buffer);
     const cached = cache.get(hash);
-    if (cached) {
+    if (cached && !RAW_MODE) {
       await ctx.reply(cached.text, { ...cached.extra, message_thread_id: ctx.message.message_thread_id });
       return;
     }
 
     const { text } = await extractTextFromImage(buffer, "TEXT");
+
+    if (RAW_MODE) {
+      const header = `RAW OCR (TEXT), thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n`;
+      const payload = (text || "").trim() || "(empty)";
+      const out = header + payload;
+    
+      // если длиннее лимита, режем на части
+      if (out.length <= MAX_TG_LEN) {
+        await ctx.reply(out, { message_thread_id: ctx.message.message_thread_id });
+      } else {
+        await ctx.reply(out.slice(0, MAX_TG_LEN), { message_thread_id: ctx.message.message_thread_id });
+        await ctx.reply(out.slice(MAX_TG_LEN, MAX_TG_LEN * 2), { message_thread_id: ctx.message.message_thread_id });
+      }
+    }
     const candidates = normalizeLines(text);
 
     if (candidates.length === 0) {
