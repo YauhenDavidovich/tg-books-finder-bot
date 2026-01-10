@@ -1,19 +1,23 @@
 import fetch from "node-fetch";
 
-function buildBooksUrl(query, apiKey) {
+function buildUrl(title, author, apiKey) {
   const base = "https://www.googleapis.com/books/v1/volumes";
+  const qParts = [];
+  if (title) qParts.push(`intitle:${title}`);
+  if (author) qParts.push(`inauthor:${author}`);
+
   const params = new URLSearchParams({
-    q: query,
+    q: qParts.join(" "),
     maxResults: "5",
-    printType: "books",
-    langRestrict: "ru" // можешь убрать или сделать динамически
+    printType: "books"
   });
+
   if (apiKey) params.set("key", apiKey);
   return `${base}?${params.toString()}`;
 }
 
-export async function findBook(query, apiKey) {
-  const url = buildBooksUrl(query, apiKey);
+export async function findBookByTitleAuthor({ title, author }, apiKey) {
+  const url = buildUrl(title, author, apiKey);
   const res = await fetch(url);
   if (!res.ok) return null;
 

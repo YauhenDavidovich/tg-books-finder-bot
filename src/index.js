@@ -2,19 +2,9 @@ import "dotenv/config";
 import { Telegraf, Markup } from "telegraf";
 import crypto from "crypto";
 import fetch from "node-fetch";
-import fs from "fs";
-import path from "path";
 
-import { extractTextFromImage } from "./ocr.js";
-import { findBook } from "./books.js";
-import { normalizeLines, shortText } from "./format.js";
-
-// --- GCP creds from Railway var (optional but handy)
-if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GCP_SA_JSON) {
-  const p = path.join("/tmp", "gcp-sa.json");
-  fs.writeFileSync(p, process.env.GCP_SA_JSON, "utf8");
-  process.env.GOOGLE_APPLICATION_CREDENTIALS = p;
-}
+import { geminiExtractBookFromImageBuffer } from "./geminiVision.js";
+import { findBookByTitleAuthor } from "./books.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -23,10 +13,9 @@ const BOOKS_KEY = process.env.GOOGLE_BOOKS_API_KEY || "";
 
 const cache = new Map();
 
-let RAW_MODE = process.env.RAW_MODE === "1"; // можно включать через Railway переменную
-const MAX_TG_LEN = 3800; // безопасный лимит под Telegram
+let RAW_MODE = process.env.RAW_MODE === "1"; // /raw on|off тоже работает
+const MAX_TG_LEN = 3800;
 
-// --- helper: download photo from Telegram
 async function downloadTelegramFile(ctx, fileId) {
   const link = await ctx.telegram.getFileLink(fileId);
   const res = await fetch(link.href);
@@ -39,32 +28,34 @@ function sha256(buf) {
 }
 
 function isAllowedTopic(ctx) {
-  // if ALLOWED_THREAD_ID = 0, allow everything (debug mode)
   if (!ALLOWED_THREAD_ID) return true;
   const threadId = ctx.message?.message_thread_id;
   return Number(threadId) === ALLOWED_THREAD_ID;
 }
 
 bot.command("raw", async (ctx) => {
-  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
+  const arg = (ctx.message?.text || "")
+    .split(" ")
+    .slice(1)
+    .join(" ")
+    .trim()
+    .toLowerCase();
 
   if (arg === "on" || arg === "1" || arg === "true") {
     RAW_MODE = true;
-    await ctx.reply("Ок, буду присылать сырой OCR текст для каждого фото в этом чате.");
+    await ctx.reply("Ок, буду присылать сырой ответ нейронки (JSON) для каждого фото в этом чате.");
     return;
   }
 
   if (arg === "off" || arg === "0" || arg === "false") {
     RAW_MODE = false;
-    await ctx.reply("Ок, больше не присылаю сырой OCR текст.");
+    await ctx.reply("Ок, больше не присылаю сырой ответ нейронки.");
     return;
   }
 
   await ctx.reply(`RAW_MODE сейчас: ${RAW_MODE ? "on" : "off"}\nКоманды: /raw on, /raw off`);
 });
 
-
-// --- MAIN: photo handler (будет работать, но в debug-режиме ответит везде)
 bot.on("photo", async (ctx) => {
   try {
     if (!isAllowedTopic(ctx)) return;
@@ -80,67 +71,65 @@ bot.on("photo", async (ctx) => {
       return;
     }
 
-    const { text } = await extractTextFromImage(buffer, "TEXT");
+    // 1) Gemini Vision: image -> JSON
+    const extracted = await geminiExtractBookFromImageBuffer(buffer, "image/jpeg");
 
     if (RAW_MODE) {
-      const header = `RAW OCR (TEXT), thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n`;
-      const payload = (text || "").trim() || "(empty)";
-      const out = header + payload;
-    
-      // если длиннее лимита, режем на части
-      if (out.length <= MAX_TG_LEN) {
-        await ctx.reply(out, { message_thread_id: ctx.message.message_thread_id });
+      const rawText = `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` +
+        JSON.stringify(extracted, null, 2);
+
+      if (rawText.length <= MAX_TG_LEN) {
+        await ctx.reply(rawText, { message_thread_id: ctx.message.message_thread_id });
       } else {
-        await ctx.reply(out.slice(0, MAX_TG_LEN), { message_thread_id: ctx.message.message_thread_id });
-        await ctx.reply(out.slice(MAX_TG_LEN, MAX_TG_LEN * 2), { message_thread_id: ctx.message.message_thread_id });
+        await ctx.reply(rawText.slice(0, MAX_TG_LEN), { message_thread_id: ctx.message.message_thread_id });
+        await ctx.reply(rawText.slice(MAX_TG_LEN, MAX_TG_LEN * 2), { message_thread_id: ctx.message.message_thread_id });
       }
     }
-    const candidates = normalizeLines(text);
 
-    if (candidates.length === 0) {
+    const items = Array.isArray(extracted?.items) ? extracted.items : [];
+    const bestItem = items.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0];
+
+    if (!bestItem || !bestItem.title || (bestItem.confidence ?? 0) < 0.65) {
       await ctx.reply(
-        "Тут не вижу названий книг. Если это рилс, попробуй кадр, где текст крупнее.",
+        "Не уверен в названии. Пришли кадр, где обложка крупнее и ровнее.",
         { message_thread_id: ctx.message.message_thread_id }
       );
       return;
     }
 
-    const results = [];
-    for (const q of candidates) {
-      const book = await findBook(q, BOOKS_KEY);
-      if (book?.title) results.push({ query: q, book });
-      if (results.length >= 6) break;
-    }
+    // 2) Confirm via Google Books
+    const book = await findBookByTitleAuthor(
+      { title: bestItem.title, author: bestItem.author || null },
+      BOOKS_KEY
+    );
 
-    if (results.length === 0) {
+    if (!book?.title) {
       await ctx.reply(
-        "Текст прочитал, но не смог уверенно сопоставить книги. Можешь прислать еще один скрин, где видно названия четче.",
+        `Похоже на: ${bestItem.title}${bestItem.author ? `, ${bestItem.author}` : ""}\nНе смог подтвердить в Google Books.`,
         { message_thread_id: ctx.message.message_thread_id }
       );
       return;
     }
 
-    let msg = "Нашёл так:\n\n";
-    for (const r of results) {
-      const title = r.book.title || r.query;
-      const author = r.book.authors?.[0] ? `, ${r.book.authors[0]}` : "";
-      const desc = shortText(r.book.description, 220);
-      msg += `• ${title}${author}\n`;
-      if (desc) msg += `${desc}\n`;
-      msg += "\n";
-    }
+    const url =
+      book.canonicalLink ||
+      `https://www.google.com/search?q=${encodeURIComponent(`${book.title} ${book.authors?.[0] || ""}`.trim())}`;
 
-    const buttons = results.slice(0, 3).map((r) => {
-      const title = r.book.title || r.query;
-      const url = r.book.canonicalLink || `https://www.google.com/search?q=${encodeURIComponent(title)}`;
-      return [Markup.button.url(title.slice(0, 28), url)];
-    });
+    const extra = Markup.inlineKeyboard([[Markup.button.url("Google Books", url)]]);
 
-    const extra = Markup.inlineKeyboard(buttons);
+    const author = book.authors?.[0] ? `, ${book.authors[0]}` : "";
+    const evidence = Array.isArray(bestItem.evidence) && bestItem.evidence.length
+      ? bestItem.evidence.slice(0, 3).join(" | ")
+      : "-";
 
-    await ctx.reply(msg.trim(), { ...extra, message_thread_id: ctx.message.message_thread_id });
+    const msg =
+      `Нашёл так:\n\n• ${book.title}${author}\n` +
+      `\nУверенность: ${(bestItem.confidence ?? 0).toFixed(2)}\n` +
+      `Доказательства: ${evidence}`;
 
-    cache.set(hash, { text: msg.trim(), extra });
+    await ctx.reply(msg, { ...extra, message_thread_id: ctx.message.message_thread_id });
+
+    cache.set(hash, { text: msg, extra });
   } catch (e) {
     console.error(e);
     await ctx.reply("Что-то пошло не так при обработке скрина. Попробуй еще раз.", {
