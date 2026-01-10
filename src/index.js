@@ -132,9 +132,17 @@ bot.on("photo", async (ctx) => {
     cache.set(hash, { text: msg, extra });
   } catch (e) {
     console.error(e);
-    await ctx.reply("Что-то пошло не так при обработке скрина. Попробуй еще раз.", {
-      message_thread_id: ctx.message?.message_thread_id
-    });
+  
+    const msg = String(e?.message || e || "unknown error").slice(0, 800);
+    if (process.env.DEBUG_ERRORS === "1") {
+      await ctx.reply(`Ошибка: ${msg}`, {
+        message_thread_id: ctx.message?.message_thread_id
+      });
+    } else {
+      await ctx.reply("Что-то пошло не так при обработке скрина. Попробуй еще раз.", {
+        message_thread_id: ctx.message?.message_thread_id
+      });
+    }
   }
 });
 
