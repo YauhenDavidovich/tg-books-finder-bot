@@ -3,8 +3,13 @@ import { Telegraf, Markup } from "telegraf";
 import crypto from "crypto";
 import fetch from "node-fetch";
 
-// ✅ приоритетный сервис: Флибуста (сетевой провайдер)
-import { searchBooks, getBookInfo, getUrl } from "./providers/flibustaProvider.js";
+// ✅ Флибуста, единственная точка импорта flibusta-api сидит внутри провайдера
+import {
+  searchBooks,
+  searchByAuthor,
+  getBookInfo,
+  getUrl
+} from "./providers/flibustaProvider.js";
 
 import { geminiExtractBookFromImageBuffer } from "./geminiVision.js";
 import { findBookByTitleAuthor } from "./books.js";
@@ -17,6 +22,8 @@ const BOOKS_KEY = process.env.GOOGLE_BOOKS_API_KEY || "";
 const cache = new Map();
 
 let RAW_MODE = process.env.RAW_MODE === "1"; // /raw on|off тоже работает
+let FLIBUSTA_DEBUG = process.env.FLIBUSTA_DEBUG === "1"; // /fdebug on|off тоже работает
+
 const MAX_TG_LEN = 3800;
 
 // --- helpers
@@ -63,36 +70,114 @@ function scoreMatch(candidate, title, author) {
   return score;
 }
 
-async function tryFlibustaFirst({ title, author }) {
-  const qTitle = String(title ?? "").trim();
+function shortTitle(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  const cut = s.split(/[.:—–(]| - /)[0].trim();
+  return cut.length >= 4 ? cut : s;
+}
+
+function formatFlibustaList(list, limit = 5) {
+  if (!Array.isArray(list) || list.length === 0) return "пусто";
+  return list.slice(0, limit).map((b, i) => {
+    const id = b?.id ?? "?";
+    const t = String(b?.title ?? "").slice(0, 120);
+    const a = String(b?.author ?? "").slice(0, 80);
+    return `${i + 1}) ${id} | ${t}${a ? `, ${a}` : ""}`;
+  }).join("\n");
+}
+
+async function replyChunked(ctx, text) {
+  const threadId = ctx.message?.message_thread_id;
+  if (!text) return;
+
+  if (text.length <= MAX_TG_LEN) {
+    await ctx.reply(text, { message_thread_id: threadId });
+    return;
+  }
+
+  await ctx.reply(text.slice(0, MAX_TG_LEN), { message_thread_id: threadId });
+  await ctx.reply(text.slice(MAX_TG_LEN, MAX_TG_LEN * 2), { message_thread_id: threadId });
+}
+
+async function tryFlibustaFirst(ctx, { title, author }) {
+  const fullTitle = String(title ?? "").trim();
   const qAuthor = String(author ?? "").trim();
+  const tShort = shortTitle(fullTitle);
 
-  if (!qTitle) return null;
+  if (!tShort) return null;
 
-  // 1) пробуем искать по "title author"
-  const query = qAuthor ? `${qTitle} ${qAuthor}` : qTitle;
-  const list = await searchBooks(query, 20);
+  const queries = [
+    qAuthor ? `${tShort} ${qAuthor}` : tShort,
+    tShort,
+    fullTitle
+  ].filter(Boolean);
 
-  if (!Array.isArray(list) || list.length === 0) return null;
+  let candidates = [];
 
-  // выбираем самый похожий
+  for (const q of queries) {
+    const list = await searchBooks(q, 20);
+
+    if (FLIBUSTA_DEBUG) {
+      const text =
+        `FLIBUSTA searchBooks("${q}") -> ${Array.isArray(list) ? list.length : 0}\n` +
+        formatFlibustaList(list, 5);
+      await replyChunked(ctx, text);
+    }
+
+    if (Array.isArray(list) && list.length) candidates = candidates.concat(list);
+  }
+
+  if ((!candidates || candidates.length === 0) && qAuthor) {
+    const byA = await searchByAuthor(qAuthor, 20);
+
+    if (FLIBUSTA_DEBUG) {
+      const text =
+        `FLIBUSTA searchByAuthor("${qAuthor}") -> ${Array.isArray(byA) ? byA.length : 0}\n` +
+        formatFlibustaList(byA, 5);
+      await replyChunked(ctx, text);
+    }
+
+    if (Array.isArray(byA) && byA.length) candidates = candidates.concat(byA);
+  }
+
+  if (!candidates.length) return null;
+
+  // дедуп по id
+  const uniq = [];
+  const seen = new Set();
+  for (const b of candidates) {
+    const key = String(b?.id ?? "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(b);
+  }
+
+  // выбираем лучший скор
   let best = null;
   let bestScore = -1;
 
-  for (const b of list) {
-    const s = scoreMatch(b, qTitle, qAuthor);
+  for (const b of uniq) {
+    const s = scoreMatch(b, tShort, qAuthor);
     if (s > bestScore) {
       bestScore = s;
       best = b;
     }
   }
 
-  // порог, чтобы не улетать в нерелевант
-  if (!best || bestScore < 5) return null;
+  const minScore = qAuthor ? 4 : 5;
 
-  // 2) тянем инфу по книге, если есть
+  if (FLIBUSTA_DEBUG) {
+    const picked =
+      best
+        ? `bestScore=${bestScore}, minScore=${minScore}\nBEST: ${best.id} | ${best.title}${best.author ? `, ${best.author}` : ""}`
+        : `BEST: null`;
+    await replyChunked(ctx, `FLIBUSTA picked:\n${picked}`);
+  }
+
+  if (!best || bestScore < minScore) return null;
+
   const info = await getBookInfo(best.id);
-
   return { book: best, info, score: bestScore };
 }
 
@@ -108,17 +193,52 @@ bot.command("raw", async (ctx) => {
 
   if (arg === "on" || arg === "1" || arg === "true") {
     RAW_MODE = true;
-    await ctx.reply("Ок, буду присылать сырой ответ нейронки (JSON) для каждого фото в этом чате.");
+    await ctx.reply("Ок, буду присылать сырой ответ нейронки (JSON) для каждого фото в этом чате.", {
+      message_thread_id: ctx.message?.message_thread_id
+    });
     return;
   }
 
   if (arg === "off" || arg === "0" || arg === "false") {
     RAW_MODE = false;
-    await ctx.reply("Ок, больше не присылаю сырой ответ нейронки.");
+    await ctx.reply("Ок, больше не присылаю сырой ответ нейронки.", {
+      message_thread_id: ctx.message?.message_thread_id
+    });
     return;
   }
 
-  await ctx.reply(`RAW_MODE сейчас: ${RAW_MODE ? "on" : "off"}\nКоманды: /raw on, /raw off`);
+  await ctx.reply(`RAW_MODE сейчас: ${RAW_MODE ? "on" : "off"}\nКоманды: /raw on, /raw off`, {
+    message_thread_id: ctx.message?.message_thread_id
+  });
+});
+
+bot.command("fdebug", async (ctx) => {
+  const arg = (ctx.message?.text || "")
+    .split(" ")
+    .slice(1)
+    .join(" ")
+    .trim()
+    .toLowerCase();
+
+  if (arg === "on" || arg === "1" || arg === "true") {
+    FLIBUSTA_DEBUG = true;
+    await ctx.reply("Ок, включил дебаг Флибусты. Буду показывать результаты запросов.", {
+      message_thread_id: ctx.message?.message_thread_id
+    });
+    return;
+  }
+
+  if (arg === "off" || arg === "0" || arg === "false") {
+    FLIBUSTA_DEBUG = false;
+    await ctx.reply("Ок, выключил дебаг Флибусты.", {
+      message_thread_id: ctx.message?.message_thread_id
+    });
+    return;
+  }
+
+  await ctx.reply(`FLIBUSTA_DEBUG сейчас: ${FLIBUSTA_DEBUG ? "on" : "off"}\nКоманды: /fdebug on, /fdebug off`, {
+    message_thread_id: ctx.message?.message_thread_id
+  });
 });
 
 // --- main
@@ -146,12 +266,7 @@ bot.on("photo", async (ctx) => {
         `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` +
         JSON.stringify(extracted, null, 2);
 
-      if (rawText.length <= MAX_TG_LEN) {
-        await ctx.reply(rawText, { message_thread_id: ctx.message.message_thread_id });
-      } else {
-        await ctx.reply(rawText.slice(0, MAX_TG_LEN), { message_thread_id: ctx.message.message_thread_id });
-        await ctx.reply(rawText.slice(MAX_TG_LEN, MAX_TG_LEN * 2), { message_thread_id: ctx.message.message_thread_id });
-      }
+      await replyChunked(ctx, rawText);
     }
 
     const items = Array.isArray(extracted?.items) ? extracted.items : [];
@@ -167,12 +282,11 @@ bot.on("photo", async (ctx) => {
     const guessedTitle = bestItem.title;
     const guessedAuthor = bestItem.author || null;
 
-    // ✅ 2) PRIORITY: Flibusta
+    // 2) PRIORITY: Flibusta
     let flibustaResult = null;
     try {
-      flibustaResult = await tryFlibustaFirst({ title: guessedTitle, author: guessedAuthor });
+      flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
     } catch (e) {
-      // провайдер кидает user-facing сообщение в e.message, если e.isUserFacing
       if (e?.isUserFacing) {
         await ctx.reply(e.message, { message_thread_id: ctx.message.message_thread_id });
         return;
@@ -194,10 +308,14 @@ bot.on("photo", async (ctx) => {
           : null;
 
       const author = book.author ? `, ${book.author}` : "";
+      const evidence = Array.isArray(bestItem.evidence) && bestItem.evidence.length
+        ? bestItem.evidence.slice(0, 3).join(" | ")
+        : "-";
 
       const buttons = [];
 
       if (book.link) buttons.push(Markup.button.url("Флибуста", book.link));
+
       const mobi = getUrl(String(book.id), "mobi");
       const epub = getUrl(String(book.id), "epub");
       if (mobi) buttons.push(Markup.button.url("Скачать MOBI", mobi));
@@ -206,10 +324,6 @@ bot.on("photo", async (ctx) => {
       const extra = buttons.length
         ? Markup.inlineKeyboard([buttons.slice(0, 2), buttons.slice(2, 4)].filter((row) => row.length))
         : undefined;
-
-      const evidence = Array.isArray(bestItem.evidence) && bestItem.evidence.length
-        ? bestItem.evidence.slice(0, 3).join(" | ")
-        : "-";
 
       const msg =
         `Нашёл во Флибусте:\n\n• ${book.title}${author}\n` +
