@@ -26,6 +26,9 @@ let FLIBUSTA_DEBUG = process.env.FLIBUSTA_DEBUG === "1"; // /fdebug on|off то�
 
 const MAX_TG_LEN = 3800;
 
+// если flibusta-api вернет относительный путь, превратим его в абсолютный
+const FLIBUSTA_BASE_URL = (process.env.FLIBUSTA_BASE_URL || "https://flibusta.is").replace(/\/+$/, "");
+
 // --- helpers
 
 async function downloadTelegramFile(ctx, fileId) {
@@ -79,12 +82,15 @@ function shortTitle(raw) {
 
 function formatFlibustaList(list, limit = 5) {
   if (!Array.isArray(list) || list.length === 0) return "пусто";
-  return list.slice(0, limit).map((b, i) => {
-    const id = b?.id ?? "?";
-    const t = String(b?.title ?? "").slice(0, 120);
-    const a = String(b?.author ?? "").slice(0, 80);
-    return `${i + 1}) ${id} | ${t}${a ? `, ${a}` : ""}`;
-  }).join("\n");
+  return list
+    .slice(0, limit)
+    .map((b, i) => {
+      const id = b?.id ?? "?";
+      const t = String(b?.title ?? "").slice(0, 120);
+      const a = String(b?.author ?? "").slice(0, 80);
+      return `${i + 1}) ${id} | ${t}${a ? `, ${a}` : ""}`;
+    })
+    .join("\n");
 }
 
 async function replyChunked(ctx, text) {
@@ -100,6 +106,14 @@ async function replyChunked(ctx, text) {
   await ctx.reply(text.slice(MAX_TG_LEN, MAX_TG_LEN * 2), { message_thread_id: threadId });
 }
 
+function toAbsoluteUrl(url) {
+  const s = String(url ?? "").trim();
+  if (!s) return "";
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  if (s.startsWith("/")) return `${FLIBUSTA_BASE_URL}${s}`;
+  return "";
+}
+
 async function tryFlibustaFirst(ctx, { title, author }) {
   const fullTitle = String(title ?? "").trim();
   const qAuthor = String(author ?? "").trim();
@@ -107,11 +121,13 @@ async function tryFlibustaFirst(ctx, { title, author }) {
 
   if (!tShort) return null;
 
-  const queries = [
+  const queriesRaw = [
     qAuthor ? `${tShort} ${qAuthor}` : tShort,
     tShort,
     fullTitle
   ].filter(Boolean);
+
+  const queries = [...new Set(queriesRaw)];
 
   let candidates = [];
 
@@ -168,10 +184,9 @@ async function tryFlibustaFirst(ctx, { title, author }) {
   const minScore = qAuthor ? 4 : 5;
 
   if (FLIBUSTA_DEBUG) {
-    const picked =
-      best
-        ? `bestScore=${bestScore}, minScore=${minScore}\nBEST: ${best.id} | ${best.title}${best.author ? `, ${best.author}` : ""}`
-        : `BEST: null`;
+    const picked = best
+      ? `bestScore=${bestScore}, minScore=${minScore}\nBEST: ${best.id} | ${best.title}${best.author ? `, ${best.author}` : ""}`
+      : `BEST: null`;
     await replyChunked(ctx, `FLIBUSTA picked:\n${picked}`);
   }
 
@@ -302,10 +317,9 @@ bot.on("photo", async (ctx) => {
           ? info.genres.slice(0, 3).map((g) => g.title).filter(Boolean).join(", ")
           : null;
 
-      const desc =
-        String(info?.description || "").trim()
-          ? String(info.description).trim().slice(0, 500)
-          : null;
+      const desc = String(info?.description || "").trim()
+        ? String(info.description).trim().slice(0, 500)
+        : null;
 
       const author = book.author ? `, ${book.author}` : "";
       const evidence = Array.isArray(bestItem.evidence) && bestItem.evidence.length
@@ -314,10 +328,12 @@ bot.on("photo", async (ctx) => {
 
       const buttons = [];
 
-      if (book.link) buttons.push(Markup.button.url("Флибуста", book.link));
+      const flibustaPage = toAbsoluteUrl(book.link);
+      if (flibustaPage) buttons.push(Markup.button.url("Флибуста", flibustaPage));
 
-      const mobi = getUrl(String(book.id), "mobi");
-      const epub = getUrl(String(book.id), "epub");
+      const mobi = toAbsoluteUrl(getUrl(String(book.id), "mobi"));
+      const epub = toAbsoluteUrl(getUrl(String(book.id), "epub"));
+
       if (mobi) buttons.push(Markup.button.url("Скачать MOBI", mobi));
       if (epub) buttons.push(Markup.button.url("Скачать EPUB", epub));
 
