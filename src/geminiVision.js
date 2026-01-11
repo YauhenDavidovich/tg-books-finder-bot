@@ -40,7 +40,7 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
 You are a book identifier.
 Extract book title and author from the image.
 Return ONLY JSON:
-{"items":[{"title":string,"author":string|null,"confidence":number,"evidence":string[]}]}
+{"items":[{"title":string,"author":string|null,"title_en":string|null,"author_en":string|null,"isbn":string|null,"confidence":number,"evidence":string[]}]}
 
 Rules:
 - Do not invent.

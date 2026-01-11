@@ -13,6 +13,7 @@
   "dependencies": {
     "@google-cloud/vision": "^5.3.4",
     "dotenv": "^17.2.3",
+    "flibusta-api": "^0.2.3",
     "node-fetch": "^3.3.2",
     "telegraf": "^4.16.3"
   }
