@@ -280,14 +280,13 @@ bot.command("find", async (ctx) => {
       return;
     }
     
-    // если confidence очень низкий, тогда просим деталей
-    if (conf < 0.25) {
-      await ctx.reply(
-        `Я понял запрос, но уверенность низкая (${conf.toFixed(2)}). Добавь 2–3 детали: страна, время, профессия героя, конфликт, жанр.`,
-        { message_thread_id: ctx.message?.message_thread_id }
-      );
-      return;
-    }
+//  Просто предупреждение, и идём искать дальше.
+if (conf < 0.25) {
+  await ctx.reply(
+    `Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`,
+    { message_thread_id: ctx.message?.message_thread_id }
+  );
+}
 
     // --- 1) PRIORITY: Flibusta через variants от Gemini
     const pseudoBestItem = {
