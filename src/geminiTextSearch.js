@@ -54,23 +54,15 @@ function tryRepairTruncatedJson(s) {
     if (ch === "{") stack.push("}");
     else if (ch === "[") stack.push("]");
     else if (ch === "}" || ch === "]") {
-      // снимаем если совпало
       if (stack.length && stack[stack.length - 1] === ch) stack.pop();
     }
   }
 
   let repaired = str;
 
-  // если обрезало внутри строки, закроем кавычку
   if (inString) repaired += '"';
-
-  // уберём хвост, если заканчивается на очевидный мусор типа "...,"
   repaired = repaired.replace(/,\s*$/, "");
-
-  // закроем незакрытые массивы/объекты
   while (stack.length) repaired += stack.pop();
-
-  // финальная страховка: если всё равно нет закрывающей }
   if (!repaired.endsWith("}")) repaired += "}";
 
   return repaired;
@@ -80,33 +72,32 @@ export async function geminiExtractBookQueryFromText(userText) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
 
-  // меньше полей = меньше шанс обрезания
   const prompt =
-    "You help search for books by a user's description.\n" +
     "Return ONLY minified JSON. No markdown, no extra text.\n" +
-    '{"query":string,"title":string|null,"author":string|null,"keywords":string[],"tags":string[],"confidence":number,' +
-    '"query_ru":string|null,"title_ru":string|null,"author_ru":string|null,"variants":string[]}\n' +
-    "Rules:\n" +
-    "- Do not invent exact title/author if not sure. Use null.\n" +
-    "- query must be short and useful for Google Books search.\n" +
-    "- keywords: 4-7 items, tags: 4-7 items.\n" +
-    "- variants: 6-10 items, each <= 80 chars.\n" +
-    "- If too little info, return confidence < 0.5.\n" +
+    'Schema: {"query":string,"title":string|null,"author":string|null,"confidence":number,' +
+    '"query_ru":string|null,"title_ru":string|null,"author_ru":string|null,' +
+    '"keywords":string[],"tags":string[],"variants":string[]}\n' +
+    "Rules: do not invent. query short. keywords 4-7. tags 4-7. variants 6-10 (<=80 chars).\n" +
     "Input:\n" +
     userText;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
+  const reqBody = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: 512,
+      responseMimeType: "application/json",
+    },
+    // ключевой фикс: режем размышления, чтобы не упираться в MAX_TOKENS раньше времени
+    thinkingConfig: { thinkingBudget: 0 },
+  };
+
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0,
-        maxOutputTokens: 384, // меньше, чтобы модель не разгонялась
-      },
-    }),
+    body: JSON.stringify(reqBody),
   });
 
   const raw = await res.text();
@@ -146,11 +137,12 @@ export async function geminiExtractBookQueryFromText(userText) {
     } catch {}
   }
 
-  // 4) нормальная ошибка с подсказкой
+  // 4) нормальная ошибка
   const preview = cleaned.slice(0, 900);
   const meta = JSON.stringify(
     {
       finishReason,
+      usageMetadata: data?.usageMetadata || null,
       candidateTextPreview: candidateText.slice(0, 1200),
       rawBodyPreview: raw.slice(0, 1200),
     },
@@ -158,7 +150,5 @@ export async function geminiExtractBookQueryFromText(userText) {
     2
   );
 
-  throw new Error(
-    `No JSON in Gemini text-search response. Preview:\n${preview}\n\nMeta:\n${meta}`
-  );
+  throw new Error(`No JSON in Gemini text-search response. Preview:\n${preview}\n\nMeta:\n${meta}`);
 }
