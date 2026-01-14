@@ -269,9 +269,21 @@ bot.command("find", async (ctx) => {
 
     const q = await geminiExtractBookQueryFromText(input);
 
-    if (!q?.query || (q.confidence ?? 0) < 0.5) {
+    const conf = Number(q?.confidence ?? 0) || 0;
+
+    // если query пустой, точно нечего искать
+    if (!q?.query) {
       await ctx.reply(
         "Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.",
+        { message_thread_id: ctx.message?.message_thread_id }
+      );
+      return;
+    }
+    
+    // если confidence очень низкий, тогда просим деталей
+    if (conf < 0.25) {
+      await ctx.reply(
+        `Я понял запрос, но уверенность низкая (${conf.toFixed(2)}). Добавь 2–3 детали: страна, время, профессия героя, конфликт, жанр.`,
         { message_thread_id: ctx.message?.message_thread_id }
       );
       return;
