@@ -38,15 +38,11 @@ function buildGeminiDebug(data, rawBody, candidateText) {
   const finishReason = cand?.finishReason || null;
   const safety = cand?.safetyRatings || null;
 
-  // rawBody может быть огромным, режем
-  const rawBodyPreview = (rawBody || "").slice(0, 2000);
-  const candidatePreview = (candidateText || "").slice(0, 2000);
-
   return {
     finishReason,
     safetyRatings: safety,
-    candidateTextPreview: candidatePreview,
-    rawBodyPreview,
+    candidateTextPreview: (candidateText || "").slice(0, 2000),
+    rawBodyPreview: (rawBody || "").slice(0, 2000),
   };
 }
 
@@ -56,18 +52,11 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
 
   const b64 = imageBuffer.toString("base64");
 
-  const prompt = `
-You are a book identifier.
-Extract book title and author from the image.
-Return ONLY JSON:
-{"items":[{"title":string,"author":string|null,"title_en":string|null,"author_en":string|null,"isbn":string|null,"confidence":number,"evidence":string[]}]}
-
-Rules:
-- Do not invent.
-- Evidence must be exact text you can read on the image (title/author fragments).
-- Ignore UI elements like likes, comments, usernames, time, follow.
-- If you cannot extract a book, return: {"items":[]}
-`.trim();
+  // Короткий prompt, чтобы не упираться в MAX_TOKENS
+  const prompt =
+    'Extract book title/author from the image. Return ONLY minified JSON. No markdown.\n' +
+    '{"items":[{"title":string,"author":string|null,"title_en":string|null,"author_en":string|null,"isbn":string|null,"confidence":number,"evidence":string[]}]}\n' +
+    'Rules: do not invent; evidence must be exact text seen on the image; ignore UI; if unsure return {"items":[]}';
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
@@ -81,7 +70,7 @@ Rules:
           parts: [{ text: prompt }, { inlineData: { mimeType, data: b64 } }],
         },
       ],
-      generationConfig: { temperature: 0, maxOutputTokens: 512 },
+      generationConfig: { temperature: 0, maxOutputTokens: 1024 },
     }),
   });
 
@@ -91,21 +80,24 @@ Rules:
   let data;
   try {
     data = JSON.parse(rawBody);
-  } catch (e) {
+  } catch {
     throw new Error(`Gemini returned non-JSON body. Preview:\n${rawBody.slice(0, 800)}`);
   }
 
-  const parts = data?.candidates?.[0]?.content?.parts;
+  const cand = data?.candidates?.[0];
+  const finishReason = cand?.finishReason || null;
+
+  const parts = cand?.content?.parts;
   const { text: candidateText, partsPreview } = readAllParts(parts);
 
   const cleaned = stripCodeFences(candidateText);
 
-  // 1) пробуем прямой JSON.parse
+  // 1) прямой JSON.parse
   try {
     return JSON.parse(cleaned);
   } catch {}
 
-  // 2) пробуем вырезать JSON объект из текста
+  // 2) вырезать JSON объект из текста
   const jsonOnly = extractJsonObject(cleaned);
   if (jsonOnly) {
     try {
@@ -113,12 +105,17 @@ Rules:
     } catch {}
   }
 
-  // 3) если не получилось, кидаем ошибку с подробным debug
+  // 3) понятная ошибка: если обрезало по токенам, скажем прямо
   const dbg = buildGeminiDebug(data, rawBody, candidateText);
-  const extra = {
-    partsPreview,
-    ...dbg,
-  };
+  const extra = { partsPreview, ...dbg };
+
+  if (finishReason === "MAX_TOKENS") {
+    throw new Error(
+      `Gemini output was truncated (MAX_TOKENS). Increase maxOutputTokens or shorten response.\n` +
+        `Candidate text preview:\n${(candidateText || "").slice(0, 800)}\n\n` +
+        `Meta:\n${JSON.stringify(extra, null, 2)}`
+    );
+  }
 
   throw new Error(
     `No JSON object found in Gemini response.\n` +
