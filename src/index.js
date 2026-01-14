@@ -12,9 +12,8 @@ import {
 } from "./providers/flibustaProvider.js";
 
 import { geminiExtractBookFromImageBuffer } from "./geminiVision.js";
-import { findBookByTitleAuthor } from "./books.js";
+import { findBookByTitleAuthor, findBooksByQuery } from "./books.js";
 import { geminiExtractBookQueryFromText } from "./geminiTextSearch.js";
-import { findBooksByQuery } from "./books.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
