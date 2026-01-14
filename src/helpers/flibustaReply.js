@@ -41,8 +41,7 @@ export function buildFlibustaReplyPayload({
 
   const buttons = [];
 
-  const flibustaPage = asNonEmptyString(book.link) ? toAbsoluteUrl(book.link) : "";
-  if (flibustaPage) buttons.push(Markup.button.url("Флибуста", flibustaPage));
+
 
   const id = String(book.id);
   const mobiRaw = getUrl(id, "mobi");
