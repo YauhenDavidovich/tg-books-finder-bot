@@ -11,23 +11,43 @@ function stripCodeFences(s) {
 function extractJsonObject(s) {
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
-  if (first === -1 || last === -1 || last <= first) {
-    throw new Error("No JSON object found in Gemini response");
-  }
+  if (first === -1 || last === -1 || last <= first) return null;
   return s.slice(first, last + 1);
 }
 
-function readCandidateText(data) {
-  const parts = data?.candidates?.[0]?.content?.parts;
-  if (!Array.isArray(parts)) return "";
+function readAllParts(parts) {
+  if (!Array.isArray(parts)) return { text: "", partsPreview: [] };
 
-  // Gemini иногда возвращает несколько parts
-  // Соберём все .text в одну строку
-  return parts
+  const partsPreview = parts.map((p) => ({
+    hasText: typeof p?.text === "string",
+    textPreview: typeof p?.text === "string" ? p.text.slice(0, 400) : null,
+    hasInlineData: !!p?.inlineData,
+  }));
+
+  const text = parts
     .map((p) => (typeof p?.text === "string" ? p.text : ""))
     .filter(Boolean)
     .join("\n")
     .trim();
+
+  return { text, partsPreview };
+}
+
+function buildGeminiDebug(data, rawBody, candidateText) {
+  const cand = data?.candidates?.[0];
+  const finishReason = cand?.finishReason || null;
+  const safety = cand?.safetyRatings || null;
+
+  // rawBody может быть огромным, режем
+  const rawBodyPreview = (rawBody || "").slice(0, 2000);
+  const candidatePreview = (candidateText || "").slice(0, 2000);
+
+  return {
+    finishReason,
+    safetyRatings: safety,
+    candidateTextPreview: candidatePreview,
+    rawBodyPreview,
+  };
 }
 
 export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "image/jpeg") {
@@ -46,6 +66,7 @@ Rules:
 - Do not invent.
 - Evidence must be exact text you can read on the image (title/author fragments).
 - Ignore UI elements like likes, comments, usernames, time, follow.
+- If you cannot extract a book, return: {"items":[]}
 `.trim();
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
@@ -67,22 +88,41 @@ Rules:
   const rawBody = await res.text();
   if (!res.ok) throw new Error(`Gemini error: ${res.status} ${rawBody}`);
 
-  const data = JSON.parse(rawBody);
+  let data;
+  try {
+    data = JSON.parse(rawBody);
+  } catch (e) {
+    throw new Error(`Gemini returned non-JSON body. Preview:\n${rawBody.slice(0, 800)}`);
+  }
 
-  // 1) основной путь: собрать текст из parts
-  let text = readCandidateText(data);
+  const parts = data?.candidates?.[0]?.content?.parts;
+  const { text: candidateText, partsPreview } = readAllParts(parts);
 
-  // 2) если вдруг пусто, попробуем старое поле (на всякий)
-  if (!text) text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const cleaned = stripCodeFences(candidateText);
 
-  // 3) чистим markdown
-  const cleaned = stripCodeFences(text);
-
-  // 4) пытаемся распарсить как есть, иначе вырезаем JSON объект
+  // 1) пробуем прямой JSON.parse
   try {
     return JSON.parse(cleaned);
-  } catch {
-    const jsonOnly = extractJsonObject(cleaned);
-    return JSON.parse(jsonOnly);
+  } catch {}
+
+  // 2) пробуем вырезать JSON объект из текста
+  const jsonOnly = extractJsonObject(cleaned);
+  if (jsonOnly) {
+    try {
+      return JSON.parse(jsonOnly);
+    } catch {}
   }
+
+  // 3) если не получилось, кидаем ошибку с подробным debug
+  const dbg = buildGeminiDebug(data, rawBody, candidateText);
+  const extra = {
+    partsPreview,
+    ...dbg,
+  };
+
+  throw new Error(
+    `No JSON object found in Gemini response.\n` +
+      `Candidate text preview:\n${(candidateText || "").slice(0, 800)}\n\n` +
+      `Meta:\n${JSON.stringify(extra, null, 2)}`
+  );
 }
