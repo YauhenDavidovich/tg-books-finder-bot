@@ -14,6 +14,7 @@ import {
 import { geminiExtractBookFromImageBuffer } from "./geminiVision.js";
 import { findBookByTitleAuthor, findBooksByQuery } from "./books.js";
 import { geminiExtractBookQueryFromText } from "./geminiTextSearch.js";
+import { replyWithFlibustaResult } from "./helpers/flibustaReply.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -277,13 +278,53 @@ bot.command("find", async (ctx) => {
       return;
     }
 
-    // Собираем запрос под Google Books
+    // --- 1) PRIORITY: Flibusta (по title/author если есть, иначе по query)
+    const flibustaTitle = q.title || q.query;
+    const flibustaAuthor = q.author || null;
+
+    let flibustaResult = null;
+    try {
+      flibustaResult = await tryFlibustaFirst(ctx, { title: flibustaTitle, author: flibustaAuthor });
+    } catch (e) {
+      if (e?.isUserFacing) {
+        await ctx.reply(e.message, { message_thread_id: ctx.message?.message_thread_id });
+        return;
+      }
+      throw e;
+    }
+
+    // bestItem у /find нет, сделаем совместимый объект
+    const pseudoBestItem = {
+      confidence: q.confidence ?? 0,
+      evidence: [
+        q.title ? `title:${q.title}` : null,
+        q.author ? `author:${q.author}` : null,
+        q.query ? `query:${q.query}` : null,
+        ...(Array.isArray(q.keywords) ? q.keywords.slice(0, 2).map((k) => `kw:${k}`) : [])
+      ].filter(Boolean)
+    };
+
+    // cacheKey для /find можно сделать из нормализованного запроса
+    const cacheKey = `find:${norm(`${flibustaTitle} ${flibustaAuthor || ""} ${q.query || ""}`)}`;
+
+    const handled = await replyWithFlibustaResult({
+      ctx,
+      flibustaResult,
+      bestItem: pseudoBestItem,
+      toAbsoluteUrl,
+      getUrl,
+      cache,
+      cacheKey
+    });
+
+    if (handled) return;
+
+    // --- 2) Fallback: Google Books
     const parts = [];
     if (q.title) parts.push(`intitle:"${q.title}"`);
     if (q.author) parts.push(`inauthor:"${q.author}"`);
     if (!parts.length) parts.push(q.query);
 
-    // Чуть усилим ключевыми словами
     const kw = Array.isArray(q.keywords) ? q.keywords.slice(0, 5) : [];
     const finalQuery = `${parts.join(" ")} ${kw.join(" ")}`.trim();
 
@@ -302,9 +343,13 @@ bot.command("find", async (ctx) => {
     const extra = Markup.inlineKeyboard([[Markup.button.url("Открыть", url)]]);
 
     const author = top.authors?.[0] ? `, ${top.authors[0]}` : "";
-    const tags = Array.isArray(q.tags) && q.tags.length
-      ? `\nТеги: #${q.tags.map(t => String(t).trim().toLowerCase().replace(/\s+/g, "_")).slice(0, 8).join(" #")}`
-      : "";
+    const tags =
+      Array.isArray(q.tags) && q.tags.length
+        ? `\nТеги: #${q.tags
+            .map((t) => String(t).trim().toLowerCase().replace(/\s+/g, "_"))
+            .slice(0, 8)
+            .join(" #")}`
+        : "";
 
     await ctx.reply(
       `Похоже на:\n• ${top.title || q.query}${author}\n\nЗапрос: ${q.query}\nУверенность: ${(q.confidence ?? 0).toFixed(2)}${tags}`,
@@ -372,51 +417,17 @@ bot.on("photo", async (ctx) => {
       throw e;
     }
 
-    if (flibustaResult?.book) {
-      const { book, info } = flibustaResult;
-
-      const genres =
-        Array.isArray(info?.genres) && info.genres.length
-          ? info.genres.slice(0, 3).map((g) => g.title).filter(Boolean).join(", ")
-          : null;
-
-      const desc = String(info?.description || "").trim()
-        ? String(info.description).trim().slice(0, 500)
-        : null;
-
-      const author = book.author ? `, ${book.author}` : "";
-      const evidence = Array.isArray(bestItem.evidence) && bestItem.evidence.length
-        ? bestItem.evidence.slice(0, 3).join(" | ")
-        : "-";
-
-      const buttons = [];
-
-      const flibustaPage = toAbsoluteUrl(book.link);
-      if (flibustaPage) buttons.push(Markup.button.url("Флибуста", flibustaPage));
-
-      const mobi = toAbsoluteUrl(getUrl(String(book.id), "mobi"));
-      const epub = toAbsoluteUrl(getUrl(String(book.id), "epub"));
-
-      if (mobi) buttons.push(Markup.button.url("Скачать MOBI", mobi));
-      if (epub) buttons.push(Markup.button.url("Скачать EPUB", epub));
-
-      const extra = buttons.length
-        ? Markup.inlineKeyboard([buttons.slice(0, 2), buttons.slice(2, 4)].filter((row) => row.length))
-        : undefined;
-
-      const msg =
-        `Нашёл во Флибусте:\n\n• ${book.title}${author}\n` +
-        `\nУверенность: ${(bestItem.confidence ?? 0).toFixed(2)}\n` +
-        `Доказательства: ${evidence}` +
-        (genres ? `\nЖанры: ${genres}` : "") +
-        (desc ? `\n\nОписание:\n${desc}` : "");
-
-      await ctx.reply(msg, { ...(extra ? extra : {}), message_thread_id: ctx.message.message_thread_id });
-
-      cache.set(hash, { text: msg, extra: extra ? extra : {} });
-      return;
-    }
-
+    const handled = await replyWithFlibustaResult({
+      ctx,
+      flibustaResult,
+      bestItem,
+      toAbsoluteUrl,
+      getUrl,
+      cache,
+      cacheKey: hash
+    });
+    
+    if (handled) return;
     // 3) Fallback: Google Books confirm
     const book = await findBookByTitleAuthor(
       { title: guessedTitle, author: guessedAuthor },
