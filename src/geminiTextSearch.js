@@ -68,36 +68,23 @@ function tryRepairTruncatedJson(s) {
   return repaired;
 }
 
-export async function geminiExtractBookQueryFromText(userText) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
+function uniqStrings(arr) {
+  return [...new Set((arr || []).map((s) => String(s || "").trim()).filter(Boolean))];
+}
 
-  const prompt =
-    "Return ONLY minified JSON. No markdown, no extra text.\n" +
-    'Schema: {"query":string,"title":string|null,"author":string|null,"confidence":number,' +
-    '"query_ru":string|null,"title_ru":string|null,"author_ru":string|null,' +
-    '"keywords":string[],"tags":string[],"variants":string[]}\n' +
-    "Rules: do not invent. query short. keywords 4-7. tags 4-7. variants 6-10 (<=80 chars).\n" +
-    "Input:\n" +
-    userText;
-
+async function geminiCallJson({ apiKey, prompt, maxOutputTokens }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
-  const reqBody = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 512,
-      responseMimeType: "application/json",
-    },
-    // ключевой фикс: режем размышления, чтобы не упираться в MAX_TOKENS раньше времени
-    thinkingConfig: { thinkingBudget: 0 },
-  };
 
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(reqBody),
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens,
+      },
+    }),
   });
 
   const raw = await res.text();
@@ -118,14 +105,14 @@ export async function geminiExtractBookQueryFromText(userText) {
 
   // 1) прямой JSON.parse
   try {
-    return JSON.parse(cleaned);
+    return { json: JSON.parse(cleaned), finishReason, usageMetadata: data?.usageMetadata || null };
   } catch {}
 
   // 2) вырезать объект, если есть закрывающая }
   const jsonOnly = extractJsonObject(cleaned);
   if (jsonOnly) {
     try {
-      return JSON.parse(jsonOnly);
+      return { json: JSON.parse(jsonOnly), finishReason, usageMetadata: data?.usageMetadata || null };
     } catch {}
   }
 
@@ -133,11 +120,10 @@ export async function geminiExtractBookQueryFromText(userText) {
   const repaired = tryRepairTruncatedJson(cleaned);
   if (repaired) {
     try {
-      return JSON.parse(repaired);
+      return { json: JSON.parse(repaired), finishReason, usageMetadata: data?.usageMetadata || null };
     } catch {}
   }
 
-  // 4) нормальная ошибка
   const preview = cleaned.slice(0, 900);
   const meta = JSON.stringify(
     {
@@ -150,5 +136,84 @@ export async function geminiExtractBookQueryFromText(userText) {
     2
   );
 
-  throw new Error(`No JSON in Gemini text-search response. Preview:\n${preview}\n\nMeta:\n${meta}`);
+  throw new Error(`No JSON in Gemini response. Preview:\n${preview}\n\nMeta:\n${meta}`);
+}
+
+export async function geminiExtractBookQueryFromText(userText) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
+
+  // --- STEP 1: минимальный JSON, чтобы не ловить MAX_TOKENS
+  const prompt1 =
+    "Return ONLY minified JSON. No markdown.\n" +
+    'Schema: {"query":string,"title":string|null,"author":string|null,"confidence":number}\n' +
+    "Rules: do not invent exact title/author. confidence < 0.5 if too little info.\n" +
+    "Input:\n" +
+    userText;
+
+  const r1 = await geminiCallJson({ apiKey, prompt: prompt1, maxOutputTokens: 160 });
+  const base = r1.json || {};
+  const confidence = Number(base.confidence ?? 0) || 0;
+
+  // базовый формат (чтобы всегда возвращать одно и то же)
+  const baseResult = {
+    query: String(base.query || ""),
+    title: base.title ?? null,
+    author: base.author ?? null,
+    confidence,
+    keywords: [],
+    tags: [],
+    query_ru: null,
+    title_ru: null,
+    author_ru: null,
+    variants: uniqStrings([
+      base.title && base.author ? `${base.title} ${base.author}` : null,
+      base.title,
+      base.query,
+    ]),
+  };
+
+  if (!baseResult.query || confidence < 0.5) return baseResult;
+
+  // --- STEP 2: RU + варианты для Флибусты + keywords/tags (держим компактно)
+  const prompt2 =
+    "Return ONLY minified JSON. No markdown.\n" +
+    'Schema: {"query_ru":string|null,"title_ru":string|null,"author_ru":string|null,"keywords":string[],"tags":string[],"variants":string[]}\n' +
+    "Rules:\n" +
+    "- Provide Russian versions if appropriate.\n" +
+    "- keywords 4-7, tags 4-7.\n" +
+    "- variants 6-10, each <= 80 chars, mix EN/RU (title, title+author, ru_title, ru_title+ru_author, query_ru).\n" +
+    "Base:\n" +
+    JSON.stringify({ query: baseResult.query, title: baseResult.title, author: baseResult.author }) +
+    "\nUser input:\n" +
+    userText;
+
+  let enrich = {};
+  try {
+    const r2 = await geminiCallJson({ apiKey, prompt: prompt2, maxOutputTokens: 280 });
+    enrich = r2.json || {};
+  } catch {
+    enrich = {};
+  }
+
+  const keywords = Array.isArray(enrich.keywords) ? enrich.keywords.slice(0, 7) : [];
+  const tags = Array.isArray(enrich.tags) ? enrich.tags.slice(0, 8) : [];
+
+  const variants = uniqStrings([
+    ...(Array.isArray(enrich.variants) ? enrich.variants : []),
+    ...baseResult.variants,
+    enrich.title_ru && enrich.author_ru ? `${enrich.title_ru} ${enrich.author_ru}` : null,
+    enrich.title_ru,
+    enrich.query_ru,
+  ]);
+
+  return {
+    ...baseResult,
+    keywords,
+    tags,
+    query_ru: enrich.query_ru ?? null,
+    title_ru: enrich.title_ru ?? null,
+    author_ru: enrich.author_ru ?? null,
+    variants,
+  };
 }

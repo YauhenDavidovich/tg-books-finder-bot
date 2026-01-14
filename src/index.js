@@ -58,6 +58,10 @@ function norm(s) {
     .trim();
 }
 
+function uniqStrings(arr) {
+  return [...new Set((arr || []).map((s) => String(s || "").trim()).filter(Boolean))];
+}
+
 function scoreMatch(candidate, title, author) {
   const ct = norm(candidate?.title);
   const ca = norm(candidate?.author);
@@ -123,12 +127,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
 
   if (!tShort) return null;
 
-  const queriesRaw = [
-    qAuthor ? `${tShort} ${qAuthor}` : tShort,
-    tShort,
-    fullTitle
-  ].filter(Boolean);
-
+  const queriesRaw = [qAuthor ? `${tShort} ${qAuthor}` : tShort, tShort, fullTitle].filter(Boolean);
   const queries = [...new Set(queriesRaw)];
 
   let candidates = [];
@@ -278,13 +277,37 @@ bot.command("find", async (ctx) => {
       return;
     }
 
-    // --- 1) PRIORITY: Flibusta (по title/author если есть, иначе по query)
-    const flibustaTitle = q.title || q.query;
-    const flibustaAuthor = q.author || null;
+    // --- 1) PRIORITY: Flibusta через variants от Gemini
+    const pseudoBestItem = {
+      confidence: q.confidence ?? 0,
+      evidence: [
+        q.title ? `title:${q.title}` : null,
+        q.author ? `author:${q.author}` : null,
+        q.title_ru ? `ru_title:${q.title_ru}` : null,
+        q.author_ru ? `ru_author:${q.author_ru}` : null,
+        q.query ? `query:${q.query}` : null,
+        q.query_ru ? `ru_query:${q.query_ru}` : null,
+        ...(Array.isArray(q.keywords) ? q.keywords.slice(0, 2).map((k) => `kw:${k}`) : [])
+      ].filter(Boolean)
+    };
+
+    const listToTry = uniqStrings([
+      ...(Array.isArray(q.variants) ? q.variants : []),
+      q.title && q.author ? `${q.title} ${q.author}` : null,
+      q.title,
+      q.query,
+      q.title_ru && q.author_ru ? `${q.title_ru} ${q.author_ru}` : null,
+      q.title_ru,
+      q.query_ru
+    ]);
 
     let flibustaResult = null;
+
     try {
-      flibustaResult = await tryFlibustaFirst(ctx, { title: flibustaTitle, author: flibustaAuthor });
+      for (const s of listToTry) {
+        flibustaResult = await tryFlibustaFirst(ctx, { title: s, author: null });
+        if (flibustaResult?.book) break;
+      }
     } catch (e) {
       if (e?.isUserFacing) {
         await ctx.reply(e.message, { message_thread_id: ctx.message?.message_thread_id });
@@ -293,19 +316,7 @@ bot.command("find", async (ctx) => {
       throw e;
     }
 
-    // bestItem у /find нет, сделаем совместимый объект
-    const pseudoBestItem = {
-      confidence: q.confidence ?? 0,
-      evidence: [
-        q.title ? `title:${q.title}` : null,
-        q.author ? `author:${q.author}` : null,
-        q.query ? `query:${q.query}` : null,
-        ...(Array.isArray(q.keywords) ? q.keywords.slice(0, 2).map((k) => `kw:${k}`) : [])
-      ].filter(Boolean)
-    };
-
-    // cacheKey для /find можно сделать из нормализованного запроса
-    const cacheKey = `find:${norm(`${flibustaTitle} ${flibustaAuthor || ""} ${q.query || ""}`)}`;
+    const cacheKey = `find:${norm(listToTry[0] || q.query || input)}`;
 
     const handled = await replyWithFlibustaResult({
       ctx,
@@ -362,8 +373,6 @@ bot.command("find", async (ctx) => {
   }
 });
 
-
-
 // --- main
 
 bot.on("photo", async (ctx) => {
@@ -405,10 +414,28 @@ bot.on("photo", async (ctx) => {
     const guessedTitle = bestItem.title;
     const guessedAuthor = bestItem.author || null;
 
-    // 2) PRIORITY: Flibusta
+    // 2) PRIORITY: Flibusta, пробуем варианты если они есть
     let flibustaResult = null;
+
+    const variantsToTry = uniqStrings([
+      ...(Array.isArray(bestItem?.variants) ? bestItem.variants : []),
+      bestItem?.title,
+      bestItem?.title_ru,
+      bestItem?.title_en,
+      bestItem?.title && bestItem?.author ? `${bestItem.title} ${bestItem.author}` : null,
+      bestItem?.title_ru && bestItem?.author_ru ? `${bestItem.title_ru} ${bestItem.author_ru}` : null,
+      bestItem?.title_en && bestItem?.author_en ? `${bestItem.title_en} ${bestItem.author_en}` : null
+    ]);
+
     try {
-      flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
+      for (const s of variantsToTry) {
+        flibustaResult = await tryFlibustaFirst(ctx, { title: s, author: null });
+        if (flibustaResult?.book) break;
+      }
+
+      if (!flibustaResult?.book) {
+        flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
+      }
     } catch (e) {
       if (e?.isUserFacing) {
         await ctx.reply(e.message, { message_thread_id: ctx.message.message_thread_id });
@@ -426,13 +453,11 @@ bot.on("photo", async (ctx) => {
       cache,
       cacheKey: hash
     });
-    
+
     if (handled) return;
+
     // 3) Fallback: Google Books confirm
-    const book = await findBookByTitleAuthor(
-      { title: guessedTitle, author: guessedAuthor },
-      BOOKS_KEY
-    );
+    const book = await findBookByTitleAuthor({ title: guessedTitle, author: guessedAuthor }, BOOKS_KEY);
 
     if (!book?.title) {
       await ctx.reply(
@@ -449,9 +474,8 @@ bot.on("photo", async (ctx) => {
     const extra = Markup.inlineKeyboard([[Markup.button.url("Google Books", url)]]);
 
     const author = book.authors?.[0] ? `, ${book.authors[0]}` : "";
-    const evidence = Array.isArray(bestItem.evidence) && bestItem.evidence.length
-      ? bestItem.evidence.slice(0, 3).join(" | ")
-      : "-";
+    const evidence =
+      Array.isArray(bestItem.evidence) && bestItem.evidence.length ? bestItem.evidence.slice(0, 3).join(" | ") : "-";
 
     const msg =
       `Нашёл так:\n\n• ${book.title}${author}\n` +
