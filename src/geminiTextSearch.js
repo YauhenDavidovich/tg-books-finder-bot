@@ -21,13 +21,20 @@ export async function geminiExtractBookQueryFromText(userText) {
 
   const prompt =
     "You help search for books by a user's description.\n" +
-    "Return ONLY minified JSON. No markdown.\n" +
-    '{"query":string,"title":string|null,"author":string|null,"keywords":string[],"tags":string[],"confidence":number}\n' +
+    "Return ONLY minified JSON. No markdown, no extra text.\n" +
+    "Schema:\n" +
+    '{"query":string,"title":string|null,"author":string|null,"keywords":string[],"tags":string[],"confidence":number,' +
+    '"query_ru":string|null,"title_ru":string|null,"author_ru":string|null,' +
+    '"variants":string[]}\n' +
     "Rules:\n" +
     "- Do not invent exact title/author if not sure. Use null.\n" +
     "- query must be short and useful for Google Books search.\n" +
     "- keywords 5-10 items, tags 5-8 items.\n" +
     "- If too little info, return confidence < 0.5.\n" +
+    "- Additionally produce Russian versions: query_ru/title_ru/author_ru.\n" +
+    "- variants must be 6-12 short search strings to try on Flibusta.\n" +
+    "  Include mixes of EN/RU: title, title+author, ru-title, ru-title+ru-author, query, query_ru.\n" +
+    "  Keep each variant <= 80 chars.\n" +
     "Input:\n" +
     userText;
 
@@ -38,7 +45,7 @@ export async function geminiExtractBookQueryFromText(userText) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0, maxOutputTokens: 512 },
+      generationConfig: { temperature: 0, maxOutputTokens: 640 },
     }),
   });
 

@@ -134,7 +134,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
   let candidates = [];
 
   for (const q of queries) {
-    const list = await searchBooks(q, 20);
+    const list = await searchBooks(q, 40);
 
     if (FLIBUSTA_DEBUG) {
       const text =
@@ -147,7 +147,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
   }
 
   if ((!candidates || candidates.length === 0) && qAuthor) {
-    const byA = await searchByAuthor(qAuthor, 20);
+    const byA = await searchByAuthor(qAuthor, 80);
 
     if (FLIBUSTA_DEBUG) {
       const text =

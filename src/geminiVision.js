@@ -52,11 +52,23 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
 
   const b64 = imageBuffer.toString("base64");
 
-  // Короткий prompt, чтобы не упираться в MAX_TOKENS
+  // Важно: просим и RU, и EN, плюс variants для Flibusta
   const prompt =
-    'Extract book title/author from the image. Return ONLY minified JSON. No markdown.\n' +
-    '{"items":[{"title":string,"author":string|null,"title_en":string|null,"author_en":string|null,"isbn":string|null,"confidence":number,"evidence":string[]}]}\n' +
-    'Rules: do not invent; evidence must be exact text seen on the image; ignore UI; if unsure return {"items":[]}';
+    "Extract book title/author from the image.\n" +
+    "Return ONLY minified JSON. No markdown, no extra text.\n" +
+    'Schema: {"items":[{"title":string,"author":string|null,' +
+    '"title_en":string|null,"author_en":string|null,' +
+    '"title_ru":string|null,"author_ru":string|null,' +
+    '"variants":string[],' +
+    '"isbn":string|null,"confidence":number,"evidence":string[]}]}\n' +
+    "Rules:\n" +
+    "- Do not invent. If unsure, return {\"items\":[]}.\n" +
+    "- evidence must be exact text seen on the image.\n" +
+    "- Ignore UI elements and stickers.\n" +
+    "- If the cover is in EN, still try to produce RU title/author if it is a well-known translation.\n" +
+    "- variants: 6-10 short search strings for Flibusta, mix EN/RU combos.\n" +
+    "  Examples of variants: title, title+author, ru_title, ru_title+ru_author, title_en+author_en.\n" +
+    "  Each variant <= 80 chars.\n";
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
@@ -105,20 +117,20 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
     } catch {}
   }
 
-  // 3) понятная ошибка: если обрезало по токенам, скажем прямо
+  // 3) понятная ошибка
   const dbg = buildGeminiDebug(data, rawBody, candidateText);
   const extra = { partsPreview, ...dbg };
 
   if (finishReason === "MAX_TOKENS") {
     throw new Error(
-      `Gemini output was truncated (MAX_TOKENS). Increase maxOutputTokens or shorten response.\n` +
+      "Gemini output was truncated (MAX_TOKENS). Increase maxOutputTokens or shorten response.\n" +
         `Candidate text preview:\n${(candidateText || "").slice(0, 800)}\n\n` +
         `Meta:\n${JSON.stringify(extra, null, 2)}`
     );
   }
 
   throw new Error(
-    `No JSON object found in Gemini response.\n` +
+    "No JSON object found in Gemini response.\n" +
       `Candidate text preview:\n${(candidateText || "").slice(0, 800)}\n\n` +
       `Meta:\n${JSON.stringify(extra, null, 2)}`
   );
