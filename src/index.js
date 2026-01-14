@@ -13,6 +13,8 @@ import {
 
 import { geminiExtractBookFromImageBuffer } from "./geminiVision.js";
 import { findBookByTitleAuthor } from "./books.js";
+import { geminiExtractBookQueryFromText } from "./geminiTextSearch.js";
+import { findBooksByQuery } from "./books.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -255,6 +257,68 @@ bot.command("fdebug", async (ctx) => {
     message_thread_id: ctx.message?.message_thread_id
   });
 });
+
+bot.command("find", async (ctx) => {
+  try {
+    const input = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim();
+    if (!input) {
+      await ctx.reply("Напиши так: /find описание книги или что помнишь", {
+        message_thread_id: ctx.message?.message_thread_id
+      });
+      return;
+    }
+
+    const q = await geminiExtractBookQueryFromText(input);
+
+    if (!q?.query || (q.confidence ?? 0) < 0.5) {
+      await ctx.reply(
+        "Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.",
+        { message_thread_id: ctx.message?.message_thread_id }
+      );
+      return;
+    }
+
+    // Собираем запрос под Google Books
+    const parts = [];
+    if (q.title) parts.push(`intitle:"${q.title}"`);
+    if (q.author) parts.push(`inauthor:"${q.author}"`);
+    if (!parts.length) parts.push(q.query);
+
+    // Чуть усилим ключевыми словами
+    const kw = Array.isArray(q.keywords) ? q.keywords.slice(0, 5) : [];
+    const finalQuery = `${parts.join(" ")} ${kw.join(" ")}`.trim();
+
+    const results = await findBooksByQuery(finalQuery, BOOKS_KEY);
+
+    if (!results.length) {
+      await ctx.reply(
+        `Не нашёл по запросу: ${q.query}\nПопробуй: больше деталей или имя автора.`,
+        { message_thread_id: ctx.message?.message_thread_id }
+      );
+      return;
+    }
+
+    const top = results[0];
+    const url = top.canonicalLink || `https://www.google.com/search?q=${encodeURIComponent(finalQuery)}`;
+    const extra = Markup.inlineKeyboard([[Markup.button.url("Открыть", url)]]);
+
+    const author = top.authors?.[0] ? `, ${top.authors[0]}` : "";
+    const tags = Array.isArray(q.tags) && q.tags.length
+      ? `\nТеги: #${q.tags.map(t => String(t).trim().toLowerCase().replace(/\s+/g, "_")).slice(0, 8).join(" #")}`
+      : "";
+
+    await ctx.reply(
+      `Похоже на:\n• ${top.title || q.query}${author}\n\nЗапрос: ${q.query}\nУверенность: ${(q.confidence ?? 0).toFixed(2)}${tags}`,
+      { ...extra, message_thread_id: ctx.message?.message_thread_id }
+    );
+  } catch (e) {
+    console.error(e);
+    const msg = String(e?.message || e).slice(0, 900);
+    await ctx.reply(`Ошибка: ${msg}`, { message_thread_id: ctx.message?.message_thread_id });
+  }
+});
+
+
 
 // --- main
 
