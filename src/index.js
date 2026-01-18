@@ -4,12 +4,7 @@ import crypto from "crypto";
 import fetch from "node-fetch";
 
 // ✅ Флибуста, единственная точка импорта flibusta-api сидит внутри провайдера
-import {
-  searchBooks,
-  searchByAuthor,
-  getBookInfo,
-  getUrl
-} from "./providers/flibustaProvider.js";
+import { searchBooks, searchByAuthor, getBookInfo, getUrl } from "./providers/flibustaProvider.js";
 
 import { geminiExtractBookFromImageBuffer } from "./geminiVision.js";
 import { findBookByTitleAuthor, findBooksByQuery } from "./books.js";
@@ -25,6 +20,7 @@ const cache = new Map();
 
 let RAW_MODE = process.env.RAW_MODE === "1"; // /raw on|off тоже работает
 let FLIBUSTA_DEBUG = process.env.FLIBUSTA_DEBUG === "1"; // /fdebug on|off тоже работает
+let GEMINI_DEBUG = process.env.GEMINI_DEBUG === "1"; // /gdebug on|off
 
 const MAX_TG_LEN = 3800;
 
@@ -120,10 +116,9 @@ function toAbsoluteUrl(url) {
   return "";
 }
 
-// универсальный подбор попыток для Флибусты
+// универсальный подбор попыток для Флибусты (без variants)
 function buildFlibustaAttemptsFromQuery(q, input) {
   const attempts = [];
-
   const add = (title, author = null) => {
     const t = String(title || "").trim();
     const a = String(author || "").trim();
@@ -239,17 +234,12 @@ async function tryFlibustaFirst(ctx, { title, author }) {
 // --- commands
 
 bot.command("raw", async (ctx) => {
-  const arg = (ctx.message?.text || "")
-    .split(" ")
-    .slice(1)
-    .join(" ")
-    .trim()
-    .toLowerCase();
+  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
 
   if (arg === "on" || arg === "1" || arg === "true") {
     RAW_MODE = true;
     await ctx.reply("Ок, буду присылать сырой ответ нейронки (JSON) для каждого фото в этом чате.", {
-      message_thread_id: ctx.message?.message_thread_id
+      message_thread_id: ctx.message?.message_thread_id,
     });
     return;
   }
@@ -257,28 +247,23 @@ bot.command("raw", async (ctx) => {
   if (arg === "off" || arg === "0" || arg === "false") {
     RAW_MODE = false;
     await ctx.reply("Ок, больше не присылаю сырой ответ нейронки.", {
-      message_thread_id: ctx.message?.message_thread_id
+      message_thread_id: ctx.message?.message_thread_id,
     });
     return;
   }
 
   await ctx.reply(`RAW_MODE сейчас: ${RAW_MODE ? "on" : "off"}\nКоманды: /raw on, /raw off`, {
-    message_thread_id: ctx.message?.message_thread_id
+    message_thread_id: ctx.message?.message_thread_id,
   });
 });
 
 bot.command("fdebug", async (ctx) => {
-  const arg = (ctx.message?.text || "")
-    .split(" ")
-    .slice(1)
-    .join(" ")
-    .trim()
-    .toLowerCase();
+  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
 
   if (arg === "on" || arg === "1" || arg === "true") {
     FLIBUSTA_DEBUG = true;
     await ctx.reply("Ок, включил дебаг Флибусты. Буду показывать результаты запросов.", {
-      message_thread_id: ctx.message?.message_thread_id
+      message_thread_id: ctx.message?.message_thread_id,
     });
     return;
   }
@@ -286,13 +271,37 @@ bot.command("fdebug", async (ctx) => {
   if (arg === "off" || arg === "0" || arg === "false") {
     FLIBUSTA_DEBUG = false;
     await ctx.reply("Ок, выключил дебаг Флибусты.", {
-      message_thread_id: ctx.message?.message_thread_id
+      message_thread_id: ctx.message?.message_thread_id,
     });
     return;
   }
 
   await ctx.reply(`FLIBUSTA_DEBUG сейчас: ${FLIBUSTA_DEBUG ? "on" : "off"}\nКоманды: /fdebug on, /fdebug off`, {
-    message_thread_id: ctx.message?.message_thread_id
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+});
+
+bot.command("gdebug", async (ctx) => {
+  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
+
+  if (arg === "on" || arg === "1" || arg === "true") {
+    GEMINI_DEBUG = true;
+    await ctx.reply("Ок, включил Gemini debug. Буду показывать сырой ответ Gemini для /find.", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  if (arg === "off" || arg === "0" || arg === "false") {
+    GEMINI_DEBUG = false;
+    await ctx.reply("Ок, выключил Gemini debug.", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  await ctx.reply(`GEMINI_DEBUG сейчас: ${GEMINI_DEBUG ? "on" : "off"}\nКоманды: /gdebug on, /gdebug off`, {
+    message_thread_id: ctx.message?.message_thread_id,
   });
 });
 
@@ -301,27 +310,41 @@ bot.command("find", async (ctx) => {
     const input = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim();
     if (!input) {
       await ctx.reply("Напиши так: /find описание книги или что помнишь", {
-        message_thread_id: ctx.message?.message_thread_id
+        message_thread_id: ctx.message?.message_thread_id,
       });
       return;
+    }
+
+    // 0) показать, что реально отдает Gemini
+    if (GEMINI_DEBUG) {
+      try {
+        const rawQ = await geminiExtractBookQueryFromText(input);
+        await replyChunked(
+          ctx,
+          `GEMINI /find parsed JSON:\n\n${JSON.stringify(rawQ, null, 2)}`
+        );
+      } catch (e) {
+        await replyChunked(
+          ctx,
+          `GEMINI /find error:\n\n${String(e?.message || e).slice(0, 3500)}`
+        );
+      }
     }
 
     const q = await geminiExtractBookQueryFromText(input);
     const conf = Number(q?.confidence ?? 0) || 0;
 
     if (!q?.query) {
-      await ctx.reply(
-        "Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.",
-        { message_thread_id: ctx.message?.message_thread_id }
-      );
+      await ctx.reply("Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.", {
+        message_thread_id: ctx.message?.message_thread_id,
+      });
       return;
     }
 
     if (conf < 0.25) {
-      await ctx.reply(
-        `Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`,
-        { message_thread_id: ctx.message?.message_thread_id }
-      );
+      await ctx.reply(`Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`, {
+        message_thread_id: ctx.message?.message_thread_id,
+      });
     }
 
     // bestItem у /find нет, делаем совместимый объект
@@ -333,8 +356,8 @@ bot.command("find", async (ctx) => {
         q.title_ru ? `ru_title:${q.title_ru}` : null,
         q.author_ru ? `ru_author:${q.author_ru}` : null,
         q.query ? `query:${q.query}` : null,
-        q.query_ru ? `ru_query:${q.query_ru}` : null
-      ].filter(Boolean)
+        q.query_ru ? `ru_query:${q.query_ru}` : null,
+      ].filter(Boolean),
     };
 
     // --- 1) PRIORITY: Flibusta, несколько попыток
@@ -363,7 +386,7 @@ bot.command("find", async (ctx) => {
       toAbsoluteUrl,
       getUrl,
       cache,
-      cacheKey
+      cacheKey,
     });
 
     if (handled) return;
@@ -375,14 +398,12 @@ bot.command("find", async (ctx) => {
     if (!parts.length) parts.push(q.query);
 
     const finalQuery = parts.join(" ").trim();
-
     const results = await findBooksByQuery(finalQuery, BOOKS_KEY);
 
     if (!results.length) {
-      await ctx.reply(
-        `Не нашёл по запросу: ${q.query}\nПопробуй: больше деталей или имя автора.`,
-        { message_thread_id: ctx.message?.message_thread_id }
-      );
+      await ctx.reply(`Не нашёл по запросу: ${q.query}\nПопробуй: больше деталей или имя автора.`, {
+        message_thread_id: ctx.message?.message_thread_id,
+      });
       return;
     }
 
@@ -425,8 +446,7 @@ bot.on("photo", async (ctx) => {
 
     if (RAW_MODE) {
       const rawText =
-        `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` +
-        JSON.stringify(extracted, null, 2);
+        `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` + JSON.stringify(extracted, null, 2);
 
       await replyChunked(ctx, rawText);
     }
@@ -436,7 +456,7 @@ bot.on("photo", async (ctx) => {
 
     if (!bestItem || !bestItem.title || (bestItem.confidence ?? 0) < 0.65) {
       await ctx.reply("Не уверен в названии. Пришли кадр, где обложка крупнее и ровнее.", {
-        message_thread_id: ctx.message.message_thread_id
+        message_thread_id: ctx.message.message_thread_id,
       });
       return;
     }
@@ -463,7 +483,7 @@ bot.on("photo", async (ctx) => {
       toAbsoluteUrl,
       getUrl,
       cache,
-      cacheKey: hash
+      cacheKey: hash,
     });
 
     if (handled) return;
@@ -502,12 +522,10 @@ bot.on("photo", async (ctx) => {
 
     const msg = String(e?.message || e || "unknown error").slice(0, 800);
     if (process.env.DEBUG_ERRORS === "1") {
-      await ctx.reply(`Ошибка: ${msg}`, {
-        message_thread_id: ctx.message?.message_thread_id
-      });
+      await ctx.reply(`Ошибка: ${msg}`, { message_thread_id: ctx.message?.message_thread_id });
     } else {
       await ctx.reply("Что-то пошло не так при обработке скрина. Попробуй еще раз.", {
-        message_thread_id: ctx.message?.message_thread_id
+        message_thread_id: ctx.message?.message_thread_id,
       });
     }
   }
