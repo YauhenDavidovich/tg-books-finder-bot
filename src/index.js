@@ -120,6 +120,45 @@ function toAbsoluteUrl(url) {
   return "";
 }
 
+// универсальный подбор попыток для Флибусты
+function buildFlibustaAttemptsFromQuery(q, input) {
+  const attempts = [];
+
+  const add = (title, author = null) => {
+    const t = String(title || "").trim();
+    const a = String(author || "").trim();
+    if (!t) return;
+    attempts.push({ title: t, author: a || null });
+  };
+
+  // 1) самое сильное: title + author
+  if (q?.title) add(q.title, q.author || null);
+  if (q?.title_ru) add(q.title_ru, q.author_ru || null);
+
+  // 2) title без автора
+  if (q?.title) add(q.title, null);
+  if (q?.title_ru) add(q.title_ru, null);
+
+  // 3) query (ru важнее для Флибусты)
+  if (q?.query_ru) add(q.query_ru, null);
+  if (q?.query) add(q.query, null);
+
+  // 4) последний шанс: original input
+  if (input) add(input, null);
+
+  // дедуп по "title|author"
+  const seen = new Set();
+  const uniq = [];
+  for (const a of attempts) {
+    const key = `${norm(a.title)}|${norm(a.author || "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(a);
+  }
+
+  return uniq;
+}
+
 async function tryFlibustaFirst(ctx, { title, author }) {
   const fullTitle = String(title ?? "").trim();
   const qAuthor = String(author ?? "").trim();
@@ -268,10 +307,8 @@ bot.command("find", async (ctx) => {
     }
 
     const q = await geminiExtractBookQueryFromText(input);
-
     const conf = Number(q?.confidence ?? 0) || 0;
 
-    // если query пустой, точно нечего искать
     if (!q?.query) {
       await ctx.reply(
         "Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.",
@@ -279,77 +316,57 @@ bot.command("find", async (ctx) => {
       );
       return;
     }
-    
-//  Просто предупреждение, и идём искать дальше.
-if (conf < 0.25) {
-  await ctx.reply(
-    `Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`,
-    { message_thread_id: ctx.message?.message_thread_id }
-  );
-}
 
- // --- 1) PRIORITY: Flibusta
-const pseudoBestItem = {
-  confidence: q.confidence ?? 0,
-  evidence: [
-    q.title ? `title:${q.title}` : null,
-    q.author ? `author:${q.author}` : null,
-    q.title_ru ? `ru_title:${q.title_ru}` : null,
-    q.author_ru ? `ru_author:${q.author_ru}` : null,
-    q.query ? `query:${q.query}` : null,
-    q.query_ru ? `ru_query:${q.query_ru}` : null,
-  ].filter(Boolean),
-};
+    if (conf < 0.25) {
+      await ctx.reply(
+        `Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`,
+        { message_thread_id: ctx.message?.message_thread_id }
+      );
+    }
 
-const attempts = [];
+    // bestItem у /find нет, делаем совместимый объект
+    const pseudoBestItem = {
+      confidence: q.confidence ?? 0,
+      evidence: [
+        q.title ? `title:${q.title}` : null,
+        q.author ? `author:${q.author}` : null,
+        q.title_ru ? `ru_title:${q.title_ru}` : null,
+        q.author_ru ? `ru_author:${q.author_ru}` : null,
+        q.query ? `query:${q.query}` : null,
+        q.query_ru ? `ru_query:${q.query_ru}` : null
+      ].filter(Boolean)
+    };
 
-// 1) если есть title+author, это самый сильный вариант (minScore станет 4)
-if (q.title) attempts.push({ title: q.title, author: q.author || null });
-if (q.title_ru) attempts.push({ title: q.title_ru, author: q.author_ru || null });
+    // --- 1) PRIORITY: Flibusta, несколько попыток
+    const attempts = buildFlibustaAttemptsFromQuery(q, input);
 
-// 2) variants от Gemini
-const variants = uniqStrings([
-  ...(Array.isArray(q.variants) ? q.variants : []),
-  q.title && q.author ? `${q.title} ${q.author}` : null,
-  q.title,
-  q.query,
-  q.title_ru && q.author_ru ? `${q.title_ru} ${q.author_ru}` : null,
-  q.title_ru,
-  q.query_ru,
-  // 3) на всякий, оригинальный user input
-  input
-]);
+    let flibustaResult = null;
+    try {
+      for (const a of attempts) {
+        flibustaResult = await tryFlibustaFirst(ctx, a);
+        if (flibustaResult?.book) break;
+      }
+    } catch (e) {
+      if (e?.isUserFacing) {
+        await ctx.reply(e.message, { message_thread_id: ctx.message?.message_thread_id });
+        return;
+      }
+      throw e;
+    }
 
-for (const v of variants) attempts.push({ title: v, author: null });
+    const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query_ru || ""} ${q.query || ""}`)}`;
 
-let flibustaResult = null;
+    const handled = await replyWithFlibustaResult({
+      ctx,
+      flibustaResult,
+      bestItem: pseudoBestItem,
+      toAbsoluteUrl,
+      getUrl,
+      cache,
+      cacheKey
+    });
 
-try {
-  for (const a of attempts) {
-    flibustaResult = await tryFlibustaFirst(ctx, a);
-    if (flibustaResult?.book) break;
-  }
-} catch (e) {
-  if (e?.isUserFacing) {
-    await ctx.reply(e.message, { message_thread_id: ctx.message?.message_thread_id });
-    return;
-  }
-  throw e;
-}
-
-const cacheKey = `find:${norm(variants[0] || q.query || input)}`;
-
-const handled = await replyWithFlibustaResult({
-  ctx,
-  flibustaResult,
-  bestItem: pseudoBestItem,
-  toAbsoluteUrl,
-  getUrl,
-  cache,
-  cacheKey
-});
-
-if (handled) return;
+    if (handled) return;
 
     // --- 2) Fallback: Google Books
     const parts = [];
@@ -357,8 +374,7 @@ if (handled) return;
     if (q.author) parts.push(`inauthor:"${q.author}"`);
     if (!parts.length) parts.push(q.query);
 
-    const kw = Array.isArray(q.keywords) ? q.keywords.slice(0, 5) : [];
-    const finalQuery = `${parts.join(" ")} ${kw.join(" ")}`.trim();
+    const finalQuery = parts.join(" ").trim();
 
     const results = await findBooksByQuery(finalQuery, BOOKS_KEY);
 
@@ -375,16 +391,9 @@ if (handled) return;
     const extra = Markup.inlineKeyboard([[Markup.button.url("Открыть", url)]]);
 
     const author = top.authors?.[0] ? `, ${top.authors[0]}` : "";
-    const tags =
-      Array.isArray(q.tags) && q.tags.length
-        ? `\nТеги: #${q.tags
-            .map((t) => String(t).trim().toLowerCase().replace(/\s+/g, "_"))
-            .slice(0, 8)
-            .join(" #")}`
-        : "";
 
     await ctx.reply(
-      `Похоже на:\n• ${top.title || q.query}${author}\n\nЗапрос: ${q.query}\nУверенность: ${(q.confidence ?? 0).toFixed(2)}${tags}`,
+      `Похоже на:\n• ${top.title || q.query}${author}\n\nЗапрос: ${q.query}\nУверенность: ${(q.confidence ?? 0).toFixed(2)}`,
       { ...extra, message_thread_id: ctx.message?.message_thread_id }
     );
   } catch (e) {
@@ -435,28 +444,10 @@ bot.on("photo", async (ctx) => {
     const guessedTitle = bestItem.title;
     const guessedAuthor = bestItem.author || null;
 
-    // 2) PRIORITY: Flibusta, пробуем варианты если они есть
+    // 2) PRIORITY: Flibusta
     let flibustaResult = null;
-
-    const variantsToTry = uniqStrings([
-      ...(Array.isArray(bestItem?.variants) ? bestItem.variants : []),
-      bestItem?.title,
-      bestItem?.title_ru,
-      bestItem?.title_en,
-      bestItem?.title && bestItem?.author ? `${bestItem.title} ${bestItem.author}` : null,
-      bestItem?.title_ru && bestItem?.author_ru ? `${bestItem.title_ru} ${bestItem.author_ru}` : null,
-      bestItem?.title_en && bestItem?.author_en ? `${bestItem.title_en} ${bestItem.author_en}` : null
-    ]);
-
     try {
-      for (const s of variantsToTry) {
-        flibustaResult = await tryFlibustaFirst(ctx, { title: s, author: null });
-        if (flibustaResult?.book) break;
-      }
-
-      if (!flibustaResult?.book) {
-        flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
-      }
+      flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
     } catch (e) {
       if (e?.isUserFacing) {
         await ctx.reply(e.message, { message_thread_id: ctx.message.message_thread_id });

@@ -24,7 +24,6 @@ function readAllParts(parts) {
     .trim();
 }
 
-// пытаемся восстановить обрезанный JSON: закрываем кавычки, ] и }
 function tryRepairTruncatedJson(s) {
   if (!s) return null;
   const str = String(s).trim();
@@ -68,10 +67,6 @@ function tryRepairTruncatedJson(s) {
   return repaired;
 }
 
-function uniqStrings(arr) {
-  return [...new Set((arr || []).map((s) => String(s || "").trim()).filter(Boolean))];
-}
-
 function collapseSpaces(s) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
@@ -79,8 +74,8 @@ function collapseSpaces(s) {
 function isBadQuery(q) {
   const s = collapseSpaces(q);
   if (!s) return true;
-  if (s.length < 8) return true; // "Стивен"
-  if (s.split(" ").length < 2) return true; // одно слово
+  if (s.length < 8) return true;
+  if (s.split(" ").length < 2) return true;
   return false;
 }
 
@@ -91,8 +86,7 @@ function buildFallbackQueryFromUserText(userText) {
     "книга","книгу","книги","роман","повесть","рассказ",
     "про","о","об","что","где","который","которая","которые",
     "и","или","в","на","из","у","по","для","с","со","без",
-    "это","этот","эта","эти","тот","та","те","там","тут",
-    "очень","просто","типа","вроде"
+    "это","этот","эта","эти","тот","та","те","там","тут"
   ]);
 
   const tokens = s
@@ -104,24 +98,34 @@ function buildFallbackQueryFromUserText(userText) {
     .filter((t) => t.length >= 3)
     .filter((t) => !stop.has(t));
 
-  const uniq = [...new Set(tokens)].slice(0, 10);
+  const uniq = [...new Set(tokens)].slice(0, 8);
   const q = uniq.join(" ").trim();
 
   return q.length >= 8 && q.split(" ").length >= 2 ? q : s;
 }
 
+function detectAuthorFromText(userText) {
+  const s = collapseSpaces(String(userText || ""));
+
+  const ru = s.match(/(?:^|\s)([А-ЯЁ][а-яё]+)\s+([А-ЯЁ][а-яё]+)(?=\s|$)/);
+  if (ru) return `${ru[1]} ${ru[2]}`;
+
+  const en = s.match(/(?:^|\s)([A-Z][a-z]+)\s+([A-Z][a-z]+)(?=\s|$)/);
+  if (en) return `${en[1]} ${en[2]}`;
+
+  return null;
+}
+
 async function geminiCallJson({ apiKey, prompt, maxOutputTokens }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0,
-        maxOutputTokens,
-      },
+      generationConfig: { temperature: 0, maxOutputTokens },
     }),
   });
 
@@ -132,153 +136,83 @@ async function geminiCallJson({ apiKey, prompt, maxOutputTokens }) {
   try {
     data = JSON.parse(raw);
   } catch {
-    throw new Error(`Gemini returned non-JSON body. Preview:\n${raw.slice(0, 800)}`);
+    throw new Error(`Gemini returned non-JSON body:\n${raw.slice(0, 800)}`);
   }
 
   const cand = data?.candidates?.[0];
-  const finishReason = cand?.finishReason || null;
-
   const candidateText = readAllParts(cand?.content?.parts);
   const cleaned = stripCodeFences(candidateText);
 
-  // 1) прямой JSON.parse
   try {
-    return { json: JSON.parse(cleaned), finishReason, usageMetadata: data?.usageMetadata || null };
+    return JSON.parse(cleaned);
   } catch {}
 
-  // 2) вырезать объект, если есть закрывающая }
   const jsonOnly = extractJsonObject(cleaned);
   if (jsonOnly) {
     try {
-      return { json: JSON.parse(jsonOnly), finishReason, usageMetadata: data?.usageMetadata || null };
+      return JSON.parse(jsonOnly);
     } catch {}
   }
 
-  // 3) попытка починить обрезанный JSON
   const repaired = tryRepairTruncatedJson(cleaned);
   if (repaired) {
     try {
-      return { json: JSON.parse(repaired), finishReason, usageMetadata: data?.usageMetadata || null };
+      return JSON.parse(repaired);
     } catch {}
   }
 
-  const preview = cleaned.slice(0, 900);
-  const meta = JSON.stringify(
-    {
-      finishReason,
-      usageMetadata: data?.usageMetadata || null,
-      candidateTextPreview: candidateText.slice(0, 1200),
-      rawBodyPreview: raw.slice(0, 1200),
-    },
-    null,
-    2
+  throw new Error(
+    `No JSON in Gemini response.\nPreview:\n${cleaned.slice(0, 800)}`
   );
-
-  throw new Error(`No JSON in Gemini response. Preview:\n${preview}\n\nMeta:\n${meta}`);
 }
 
 export async function geminiExtractBookQueryFromText(userText) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
 
-  // --- STEP 1: минимальный JSON, чтобы не ловить MAX_TOKENS
-  const prompt1 =
-    "Return ONLY minified JSON. No markdown.\n" +
-    'Schema: {"query":string,"title":string|null,"author":string|null,"confidence":number}\n' +
+  const prompt =
+    "Return ONLY minified JSON. No markdown, no comments.\n" +
+    'Schema: {"query":string,"title":string|null,"author":string|null,"query_ru":string|null,"title_ru":string|null,"author_ru":string|null,"confidence":number}\n' +
     "Rules:\n" +
-    "- Do not invent exact title/author.\n" +
-    "- query must include at least 2 words when possible.\n" +
-    "- If too little info, return confidence < 0.5.\n" +
+    "- Do not invent exact title or author.\n" +
+    "- query must be useful for book search (2–6 words).\n" +
+    "- If not confident, set confidence < 0.5 but still return best guess.\n" +
     "Input:\n" +
     userText;
 
-  const r1 = await geminiCallJson({ apiKey, prompt: prompt1, maxOutputTokens: 180 });
-  const base = r1.json || {};
+  const j = await geminiCallJson({
+    apiKey,
+    prompt,
+    maxOutputTokens: 280,
+  });
 
-  let query = String(base.query || "");
-  let confidence = Number(base.confidence ?? 0) || 0;
+  let query = String(j.query || "");
+  let confidence = Number(j.confidence ?? 0) || 0;
 
-  const baseResult = {
-    query,
-    title: base.title ?? null,
-    author: base.author ?? null,
-    confidence,
-    keywords: [],
-    tags: [],
-    query_ru: null,
-    title_ru: null,
-    author_ru: null,
-    variants: uniqStrings([
-      base.title && base.author ? `${base.title} ${base.author}` : null,
-      base.title,
-      base.query,
-    ]),
-  };
+  let title = j.title ?? null;
+  let author = j.author ?? null;
 
-  // --- FIX: если query плохой (короткий/одно слово), заменяем на фолбэк
-  if (isBadQuery(baseResult.query)) {
-    baseResult.query = buildFallbackQueryFromUserText(userText);
-    baseResult.confidence = Math.max(Number(baseResult.confidence || 0), 0.55);
-  } else {
-    // если модель дала query, но confidence=0, это часто “не оценил”, а не “нет инфы”
-    if (baseResult.query && baseResult.confidence === 0) {
-      baseResult.confidence = 0.55;
-    }
+  if (!author) {
+    const a = detectAuthorFromText(userText);
+    if (a) author = a;
   }
 
-  // variants тоже обновим, если query поменялся
-  baseResult.variants = uniqStrings([
-    baseResult.title && baseResult.author ? `${baseResult.title} ${baseResult.author}` : null,
-    baseResult.title,
-    baseResult.query,
-  ]);
-
-  if (!baseResult.query) return baseResult;
-
-  // --- STEP 2: RU + варианты для Флибусты + keywords/tags
-  // запускаем, если query не пустой и не “плохой”
-  if (isBadQuery(baseResult.query)) return baseResult;
-
-  const prompt2 =
-    "Return ONLY minified JSON. No markdown.\n" +
-    'Schema: {"query_ru":string|null,"title_ru":string|null,"author_ru":string|null,"keywords":string[],"tags":string[],"variants":string[]}\n' +
-    "Rules:\n" +
-    "- Provide Russian versions if appropriate.\n" +
-    "- keywords 4-7, tags 4-7.\n" +
-    "- variants 6-10, each <= 80 chars, mix EN/RU.\n" +
-    "Base:\n" +
-    JSON.stringify({ query: baseResult.query, title: baseResult.title, author: baseResult.author }) +
-    "\nUser input:\n" +
-    userText;
-
-  let enrich = {};
-  try {
-    const r2 = await geminiCallJson({ apiKey, prompt: prompt2, maxOutputTokens: 320 });
-    enrich = r2.json || {};
-  } catch {
-    enrich = {};
+  if (isBadQuery(query)) {
+    query = buildFallbackQueryFromUserText(userText);
+    confidence = Math.max(confidence, 0.55);
+  } else if (query && confidence === 0) {
+    confidence = 0.55;
   }
-
-  const keywords = Array.isArray(enrich.keywords) ? enrich.keywords.slice(0, 7) : [];
-  const tags = Array.isArray(enrich.tags) ? enrich.tags.slice(0, 8) : [];
-
-  const variants = uniqStrings([
-    ...(Array.isArray(enrich.variants) ? enrich.variants : []),
-    ...baseResult.variants,
-    enrich.title_ru && enrich.author_ru ? `${enrich.title_ru} ${enrich.author_ru}` : null,
-    enrich.title_ru,
-    enrich.query_ru,
-    // на всякий
-    userText
-  ]);
 
   return {
-    ...baseResult,
-    keywords,
-    tags,
-    query_ru: enrich.query_ru ?? null,
-    title_ru: enrich.title_ru ?? null,
-    author_ru: enrich.author_ru ?? null,
-    variants,
+    query,
+    title,
+    author,
+    confidence,
+    query_ru: j.query_ru ?? null,
+    title_ru: j.title_ru ?? null,
+    author_ru: j.author_ru ?? null,
+    keywords: [],
+    tags: [],
   };
 }
