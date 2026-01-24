@@ -98,7 +98,7 @@ export async function geminiDebugBookQueryFromText(userText) {
   return geminiCallRaw({
     apiKey,
     prompt,
-    maxOutputTokens: 220,
+    maxOutputTokens: 1024,
   });
 }
 
