@@ -8,7 +8,7 @@ import { searchBooks, searchByAuthor, getBookInfo, getUrl } from "./providers/fl
 
 import { geminiExtractBookFromImageBuffer } from "./geminiVision.js";
 import { findBookByTitleAuthor, findBooksByQuery } from "./books.js";
-import { geminiExtractBookQueryFromText } from "./geminiTextSearch.js";
+import { geminiExtractBookQueryFromText, geminiDebugBookQueryFromText } from "./geminiTextSearch.js";
 import { replyWithFlibustaResult } from "./helpers/flibustaReply.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -23,8 +23,6 @@ let FLIBUSTA_DEBUG = process.env.FLIBUSTA_DEBUG === "1"; // /fdebug on|off то�
 let GEMINI_DEBUG = process.env.GEMINI_DEBUG === "1"; // /gdebug on|off
 
 const MAX_TG_LEN = 3800;
-
-// если flibusta-api вернет относительный путь, превратим его в абсолютный
 const FLIBUSTA_BASE_URL = (process.env.FLIBUSTA_BASE_URL || "https://flibusta.is").replace(/\/+$/, "");
 
 // --- helpers
@@ -52,10 +50,6 @@ function norm(s) {
     .replace(/ё/g, "е")
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
-}
-
-function uniqStrings(arr) {
-  return [...new Set((arr || []).map((s) => String(s || "").trim()).filter(Boolean))];
 }
 
 function scoreMatch(candidate, title, author) {
@@ -116,7 +110,7 @@ function toAbsoluteUrl(url) {
   return "";
 }
 
-// универсальный подбор попыток для Флибусты (без variants)
+// универсальный подбор попыток для Флибусты (упрощённый, без *_ru и без variants)
 function buildFlibustaAttemptsFromQuery(q, input) {
   const attempts = [];
   const add = (title, author = null) => {
@@ -128,14 +122,11 @@ function buildFlibustaAttemptsFromQuery(q, input) {
 
   // 1) самое сильное: title + author
   if (q?.title) add(q.title, q.author || null);
-  if (q?.title_ru) add(q.title_ru, q.author_ru || null);
 
   // 2) title без автора
   if (q?.title) add(q.title, null);
-  if (q?.title_ru) add(q.title_ru, null);
 
-  // 3) query (ru важнее для Флибусты)
-  if (q?.query_ru) add(q.query_ru, null);
+  // 3) query
   if (q?.query) add(q.query, null);
 
   // 4) последний шанс: original input
@@ -194,7 +185,6 @@ async function tryFlibustaFirst(ctx, { title, author }) {
 
   if (!candidates.length) return null;
 
-  // дедуп по id
   const uniq = [];
   const seen = new Set();
   for (const b of candidates) {
@@ -204,7 +194,6 @@ async function tryFlibustaFirst(ctx, { title, author }) {
     uniq.push(b);
   }
 
-  // выбираем лучший скор
   let best = null;
   let bestScore = -1;
 
@@ -286,7 +275,7 @@ bot.command("gdebug", async (ctx) => {
 
   if (arg === "on" || arg === "1" || arg === "true") {
     GEMINI_DEBUG = true;
-    await ctx.reply("Ок, включил Gemini debug. Буду показывать сырой ответ Gemini для /find.", {
+    await ctx.reply("Ок, включил Gemini debug. Буду показывать raw ответ Gemini для /find.", {
       message_thread_id: ctx.message?.message_thread_id,
     });
     return;
@@ -315,22 +304,26 @@ bot.command("find", async (ctx) => {
       return;
     }
 
-    // 0) показать, что реально отдает Gemini
+    // 0) Gemini raw debug: показываем candidateText и finishReason
     if (GEMINI_DEBUG) {
       try {
-        const rawQ = await geminiExtractBookQueryFromText(input);
-        await replyChunked(
-          ctx,
-          `GEMINI /find parsed JSON:\n\n${JSON.stringify(rawQ, null, 2)}`
-        );
+        const dbg = await geminiDebugBookQueryFromText(input);
+        const bodyPreview = String(dbg?.rawBody || "").slice(0, 2000);
+        const candPreview = String(dbg?.candidateText || "").slice(0, 2000);
+        const info =
+          `GEMINI DEBUG\n` +
+          `finishReason: ${dbg?.finishReason || "-"}\n` +
+          `status: ${dbg?.status ?? "-"}\n\n` +
+          `candidateText:\n${candPreview || "(empty)"}\n\n` +
+          `rawBody preview:\n${bodyPreview || "(empty)"}`;
+
+        await replyChunked(ctx, info);
       } catch (e) {
-        await replyChunked(
-          ctx,
-          `GEMINI /find error:\n\n${String(e?.message || e).slice(0, 3500)}`
-        );
+        await replyChunked(ctx, `GEMINI DEBUG ERROR:\n${String(e?.message || e).slice(0, 3500)}`);
       }
     }
 
+    // 1) Gemini parsed JSON (без repair и без fallback)
     const q = await geminiExtractBookQueryFromText(input);
     const conf = Number(q?.confidence ?? 0) || 0;
 
@@ -347,37 +340,25 @@ bot.command("find", async (ctx) => {
       });
     }
 
-    // bestItem у /find нет, делаем совместимый объект
     const pseudoBestItem = {
       confidence: q.confidence ?? 0,
       evidence: [
         q.title ? `title:${q.title}` : null,
         q.author ? `author:${q.author}` : null,
-        q.title_ru ? `ru_title:${q.title_ru}` : null,
-        q.author_ru ? `ru_author:${q.author_ru}` : null,
         q.query ? `query:${q.query}` : null,
-        q.query_ru ? `ru_query:${q.query_ru}` : null,
       ].filter(Boolean),
     };
 
-    // --- 1) PRIORITY: Flibusta, несколько попыток
+    // --- 2) PRIORITY: Flibusta
     const attempts = buildFlibustaAttemptsFromQuery(q, input);
 
     let flibustaResult = null;
-    try {
-      for (const a of attempts) {
-        flibustaResult = await tryFlibustaFirst(ctx, a);
-        if (flibustaResult?.book) break;
-      }
-    } catch (e) {
-      if (e?.isUserFacing) {
-        await ctx.reply(e.message, { message_thread_id: ctx.message?.message_thread_id });
-        return;
-      }
-      throw e;
+    for (const a of attempts) {
+      flibustaResult = await tryFlibustaFirst(ctx, a);
+      if (flibustaResult?.book) break;
     }
 
-    const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query_ru || ""} ${q.query || ""}`)}`;
+    const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query || ""}`)}`;
 
     const handled = await replyWithFlibustaResult({
       ctx,
@@ -391,7 +372,7 @@ bot.command("find", async (ctx) => {
 
     if (handled) return;
 
-    // --- 2) Fallback: Google Books
+    // --- 3) Fallback: Google Books
     const parts = [];
     if (q.title) parts.push(`intitle:"${q.title}"`);
     if (q.author) parts.push(`inauthor:"${q.author}"`);
@@ -419,7 +400,7 @@ bot.command("find", async (ctx) => {
     );
   } catch (e) {
     console.error(e);
-    const msg = String(e?.message || e).slice(0, 900);
+    const msg = String(e?.message || e).slice(0, 1600);
     await ctx.reply(`Ошибка: ${msg}`, { message_thread_id: ctx.message?.message_thread_id });
   }
 });
@@ -465,16 +446,7 @@ bot.on("photo", async (ctx) => {
     const guessedAuthor = bestItem.author || null;
 
     // 2) PRIORITY: Flibusta
-    let flibustaResult = null;
-    try {
-      flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
-    } catch (e) {
-      if (e?.isUserFacing) {
-        await ctx.reply(e.message, { message_thread_id: ctx.message.message_thread_id });
-        return;
-      }
-      throw e;
-    }
+    const flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
 
     const handled = await replyWithFlibustaResult({
       ctx,
