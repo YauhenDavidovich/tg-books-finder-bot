@@ -232,7 +232,141 @@ async function tryFlibustaFirst(ctx, { title, author }) {
   return { book: best, info, score: bestScore };
 }
 
+async function handleFindQuery(ctx, input) {
+  // 0) Gemini raw debug: показываем candidateText и finishReason
+  if (GEMINI_DEBUG) {
+    try {
+      const dbg = await geminiDebugBookQueryFromText(input);
+      const bodyPreview = String(dbg?.rawBody || "").slice(0, 2000);
+      const candPreview = String(dbg?.candidateText || "").slice(0, 2000);
+      const info =
+        `GEMINI DEBUG\n` +
+        `finishReason: ${dbg?.finishReason || "-"}\n` +
+        `status: ${dbg?.status ?? "-"}\n\n` +
+        `candidateText:\n${candPreview || "(empty)"}\n\n` +
+        `rawBody preview:\n${bodyPreview || "(empty)"}`;
+
+      await replyChunked(ctx, info);
+    } catch (e) {
+      await replyChunked(ctx, `GEMINI DEBUG ERROR:\n${String(e?.message || e).slice(0, 3500)}`);
+    }
+  }
+
+  // 1) Gemini parsed JSON
+  const q = await geminiExtractBookQueryFromText(input);
+  const conf = Number(q?.confidence ?? 0) || 0;
+
+  if (!q?.query) {
+    await ctx.reply("Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  if (conf < 0.25) {
+    await ctx.reply(`Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`, {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+  }
+
+  const pseudoBestItem = {
+    confidence: q.confidence ?? 0,
+    evidence: [q.title ? `title:${q.title}` : null, q.author ? `author:${q.author}` : null, q.query ? `query:${q.query}` : null].filter(Boolean),
+  };
+
+  // 2) PRIORITY: Flibusta
+  const attempts = buildFlibustaAttemptsFromQuery(q, input);
+
+  let flibustaResult = null;
+  for (const a of attempts) {
+    flibustaResult = await tryFlibustaFirst(ctx, a);
+    if (flibustaResult?.book) break;
+  }
+
+  const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query || ""}`)}`;
+
+  const handled = await replyWithFlibustaResult({
+    ctx,
+    flibustaResult,
+    bestItem: pseudoBestItem,
+    toAbsoluteUrl,
+    getUrl,
+    cache,
+    cacheKey,
+  });
+
+  if (handled) return;
+
+  // 3) Fallback: Google Books
+  const parts = [];
+  if (q.title) parts.push(`intitle:"${q.title}"`);
+  if (q.author) parts.push(`inauthor:"${q.author}"`);
+  if (!parts.length) parts.push(q.query);
+
+  const finalQuery = parts.join(" ").trim();
+  const results = await findBooksByQuery(finalQuery, BOOKS_KEY);
+
+  if (!results.length) {
+    await ctx.reply(`Не нашёл по запросу: ${q.query}\nПопробуй: больше деталей или имя автора.`, {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  const top = results[0];
+  const url = top.canonicalLink || `https://www.google.com/search?q=${encodeURIComponent(finalQuery)}`;
+  const extra = Markup.inlineKeyboard([[Markup.button.url("Открыть", url)]]);
+
+  const author = top.authors?.[0] ? `, ${top.authors[0]}` : "";
+
+  await ctx.reply(`Похоже на:\n• ${top.title || q.query}${author}\n\nЗапрос: ${q.query}\nУверенность: ${(q.confidence ?? 0).toFixed(2)}`, {
+    ...extra,
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+}
+
 // --- commands
+
+bot.start(async (ctx) => {
+  const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
+  await ctx.reply(
+    "Я могу искать книгу по тексту ИЛИ по фото обложки.\n\nПросто пришли описание книги обычным сообщением или отправь фото обложки.",
+    { ...kb, message_thread_id: ctx.message?.message_thread_id }
+  );
+});
+
+bot.help(async (ctx) => {
+  await ctx.reply(
+    "Как пользоваться:\n• Отправь текст (сюжет, цитату, описание) — я найду книгу/автора\n• Или отправь фото обложки\n• Сначала ищу во Флибусте, затем fallback в Google Books\n\nКоманды:\n/find <текст>\n/raw on|off\n/fdebug on|off\n/gdebug on|off",
+    { message_thread_id: ctx.message?.message_thread_id }
+  );
+});
+
+bot.command("menu", async (ctx) => {
+  const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
+  await ctx.reply("Меню включено. Можешь сразу прислать текст или фото.", {
+    ...kb,
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+});
+
+bot.hears("🔎 По тексту", async (ctx) => {
+  await ctx.reply("Пришли описание книги обычным текстом — без /find, я пойму сам.", {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+});
+
+bot.hears("📷 По фото", async (ctx) => {
+  await ctx.reply("Пришли фото обложки (чем крупнее и ровнее — тем лучше).", {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+});
+
+bot.hears("ℹ️ Помощь", async (ctx) => {
+  await ctx.reply("Я умею:\n• распознавать книгу по фото\n• находить книгу по описанию\n• отдавать ссылку на Флибусту или Google Books", {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+});
 
 bot.command("raw", async (ctx) => {
   const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
@@ -316,100 +450,7 @@ bot.command("find", async (ctx) => {
       return;
     }
 
-    // 0) Gemini raw debug: показываем candidateText и finishReason
-    if (GEMINI_DEBUG) {
-      try {
-        const dbg = await geminiDebugBookQueryFromText(input);
-        const bodyPreview = String(dbg?.rawBody || "").slice(0, 2000);
-        const candPreview = String(dbg?.candidateText || "").slice(0, 2000);
-        const info =
-          `GEMINI DEBUG\n` +
-          `finishReason: ${dbg?.finishReason || "-"}\n` +
-          `status: ${dbg?.status ?? "-"}\n\n` +
-          `candidateText:\n${candPreview || "(empty)"}\n\n` +
-          `rawBody preview:\n${bodyPreview || "(empty)"}`;
-
-        await replyChunked(ctx, info);
-      } catch (e) {
-        await replyChunked(ctx, `GEMINI DEBUG ERROR:\n${String(e?.message || e).slice(0, 3500)}`);
-      }
-    }
-
-    // 1) Gemini parsed JSON (без repair и без fallback)
-    const q = await geminiExtractBookQueryFromText(input);
-    const conf = Number(q?.confidence ?? 0) || 0;
-
-    if (!q?.query) {
-      await ctx.reply("Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.", {
-        message_thread_id: ctx.message?.message_thread_id,
-      });
-      return;
-    }
-
-    if (conf < 0.25) {
-      await ctx.reply(`Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`, {
-        message_thread_id: ctx.message?.message_thread_id,
-      });
-    }
-
-    const pseudoBestItem = {
-      confidence: q.confidence ?? 0,
-      evidence: [
-        q.title ? `title:${q.title}` : null,
-        q.author ? `author:${q.author}` : null,
-        q.query ? `query:${q.query}` : null,
-      ].filter(Boolean),
-    };
-
-    // --- 2) PRIORITY: Flibusta
-    const attempts = buildFlibustaAttemptsFromQuery(q, input);
-
-    let flibustaResult = null;
-    for (const a of attempts) {
-      flibustaResult = await tryFlibustaFirst(ctx, a);
-      if (flibustaResult?.book) break;
-    }
-
-    const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query || ""}`)}`;
-
-    const handled = await replyWithFlibustaResult({
-      ctx,
-      flibustaResult,
-      bestItem: pseudoBestItem,
-      toAbsoluteUrl,
-      getUrl,
-      cache,
-      cacheKey,
-    });
-
-    if (handled) return;
-
-    // --- 3) Fallback: Google Books
-    const parts = [];
-    if (q.title) parts.push(`intitle:"${q.title}"`);
-    if (q.author) parts.push(`inauthor:"${q.author}"`);
-    if (!parts.length) parts.push(q.query);
-
-    const finalQuery = parts.join(" ").trim();
-    const results = await findBooksByQuery(finalQuery, BOOKS_KEY);
-
-    if (!results.length) {
-      await ctx.reply(`Не нашёл по запросу: ${q.query}\nПопробуй: больше деталей или имя автора.`, {
-        message_thread_id: ctx.message?.message_thread_id,
-      });
-      return;
-    }
-
-    const top = results[0];
-    const url = top.canonicalLink || `https://www.google.com/search?q=${encodeURIComponent(finalQuery)}`;
-    const extra = Markup.inlineKeyboard([[Markup.button.url("Открыть", url)]]);
-
-    const author = top.authors?.[0] ? `, ${top.authors[0]}` : "";
-
-    await ctx.reply(
-      `Похоже на:\n• ${top.title || q.query}${author}\n\nЗапрос: ${q.query}\nУверенность: ${(q.confidence ?? 0).toFixed(2)}`,
-      { ...extra, message_thread_id: ctx.message?.message_thread_id }
-    );
+    await handleFindQuery(ctx, input);
   } catch (e) {
     console.error(e);
     const msg = String(e?.message || e).slice(0, 1600);
@@ -418,6 +459,22 @@ bot.command("find", async (ctx) => {
 });
 
 // --- main
+
+bot.on("text", async (ctx) => {
+  try {
+    if (!isAllowedTopic(ctx)) return;
+
+    const text = String(ctx.message?.text || "").trim();
+    if (!text) return;
+    if (text.startsWith("/")) return; // commands handled separately
+
+    await handleFindQuery(ctx, text);
+  } catch (e) {
+    console.error(e);
+    const msg = String(e?.message || e).slice(0, 1600);
+    await ctx.reply(`Ошибка: ${msg}`, { message_thread_id: ctx.message?.message_thread_id });
+  }
+});
 
 bot.on("photo", async (ctx) => {
   try {
@@ -514,6 +571,17 @@ bot.on("photo", async (ctx) => {
     }
   }
 });
+
+bot.telegram
+  .setMyCommands([
+    { command: "find", description: "Найти книгу по описанию" },
+    { command: "menu", description: "Показать меню" },
+    { command: "help", description: "Как пользоваться" },
+    { command: "raw", description: "RAW режим Gemini Vision" },
+    { command: "fdebug", description: "Дебаг Флибусты" },
+    { command: "gdebug", description: "Дебаг Gemini /find" },
+  ])
+  .catch((e) => console.error("setMyCommands failed:", e?.message || e));
 
 bot.launch();
 process.once("SIGINT", () => bot.stop("SIGINT"));
