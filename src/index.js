@@ -63,6 +63,18 @@ function scoreMatch(candidate, title, author) {
   if (qt && ct === qt) score += 6;
   else if (qt && (ct.includes(qt) || qt.includes(ct))) score += 4;
 
+  // token overlap helps with partial/missing words (e.g. "перевал середине пути")
+  if (qt && ct) {
+    const qTokens = qt.split(/\s+/).filter(Boolean);
+    const cTokens = new Set(ct.split(/\s+/).filter(Boolean));
+    if (qTokens.length) {
+      const matched = qTokens.filter((t) => cTokens.has(t)).length;
+      const ratio = matched / qTokens.length;
+      if (ratio >= 0.8) score += 2;
+      else if (ratio >= 0.6) score += 1;
+    }
+  }
+
   if (qa && ca === qa) score += 4;
   else if (qa && (ca.includes(qa) || qa.includes(ca))) score += 2;
 
@@ -205,7 +217,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
     }
   }
 
-  const minScore = qAuthor ? 4 : 5;
+  const minScore = qAuthor ? 4 : 4;
 
   if (FLIBUSTA_DEBUG) {
     const picked = best
