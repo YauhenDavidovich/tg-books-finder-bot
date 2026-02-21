@@ -2,6 +2,9 @@ import "dotenv/config";
 import { Telegraf, Markup } from "telegraf";
 import crypto from "crypto";
 import fetch from "node-fetch";
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
 
 // ✅ Флибуста, единственная точка импорта flibusta-api сидит внутри провайдера
 import { searchBooks, searchByAuthor, getBookInfo, getUrl } from "./providers/flibustaProvider.js";
@@ -15,6 +18,11 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 const ALLOWED_THREAD_ID = Number(process.env.ALLOWED_THREAD_ID || 0);
 const BOOKS_KEY = process.env.GOOGLE_BOOKS_API_KEY || "";
+const OWNER_ID = Number(process.env.OWNER_ID || 0);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ACCESS_FILE = process.env.ACCESS_FILE || path.join(__dirname, "../data/access.json");
 
 const cache = new Map();
 
@@ -24,6 +32,132 @@ let GEMINI_DEBUG = process.env.GEMINI_DEBUG === "1"; // /gdebug on|off
 
 const MAX_TG_LEN = 3800;
 const FLIBUSTA_BASE_URL = (process.env.FLIBUSTA_BASE_URL || "https://flibusta.is").replace(/\/+$/, "");
+
+const accessStore = {
+  allowed: new Set(),
+  pending: {},
+};
+
+async function loadAccessStore() {
+  try {
+    const raw = await fs.readFile(ACCESS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const allowed = Array.isArray(parsed?.allowed) ? parsed.allowed.map((x) => Number(x)).filter(Boolean) : [];
+    const pending = parsed?.pending && typeof parsed.pending === "object" ? parsed.pending : {};
+
+    accessStore.allowed = new Set(allowed);
+    accessStore.pending = pending;
+  } catch {
+    await saveAccessStore();
+  }
+}
+
+async function saveAccessStore() {
+  const dir = path.dirname(ACCESS_FILE);
+  await fs.mkdir(dir, { recursive: true });
+  const payload = {
+    allowed: [...accessStore.allowed],
+    pending: accessStore.pending,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(ACCESS_FILE, JSON.stringify(payload, null, 2), "utf8");
+}
+
+function getUserId(ctx) {
+  return Number(ctx.from?.id || 0);
+}
+
+function isOwner(userId) {
+  return Boolean(OWNER_ID) && Number(userId) === OWNER_ID;
+}
+
+function isAllowedUser(userId) {
+  if (!userId) return false;
+  if (isOwner(userId)) return true;
+  return accessStore.allowed.has(Number(userId));
+}
+
+function parseTargetUserId(ctx) {
+  const arg = String(ctx.message?.text || "")
+    .split(" ")
+    .slice(1)
+    .join(" ")
+    .trim();
+
+  if (/^\d+$/.test(arg)) return Number(arg);
+
+  const replied = Number(ctx.message?.reply_to_message?.from?.id || 0);
+  if (replied) return replied;
+
+  return 0;
+}
+
+function requestAccessKeyboard() {
+  return Markup.inlineKeyboard([[Markup.button.callback("✅ Запросить доступ", "acc:req")]]);
+}
+
+async function requestAccess(ctx) {
+  const userId = getUserId(ctx);
+  if (!userId) return;
+
+  if (isAllowedUser(userId)) {
+    await ctx.reply("У тебя уже есть доступ ✅", { message_thread_id: ctx.message?.message_thread_id });
+    return;
+  }
+
+  const existingToken = Object.keys(accessStore.pending).find((t) => Number(accessStore.pending[t]?.userId) === userId);
+  if (existingToken) {
+    await ctx.reply("Заявка уже отправлена. Жди подтверждения владельца 👌", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  const token = crypto.randomBytes(8).toString("hex");
+  accessStore.pending[token] = {
+    userId,
+    firstName: String(ctx.from?.first_name || ""),
+    lastName: String(ctx.from?.last_name || ""),
+    username: String(ctx.from?.username || ""),
+    createdAt: new Date().toISOString(),
+  };
+  await saveAccessStore();
+
+  if (OWNER_ID) {
+    const who = `${accessStore.pending[token].firstName} ${accessStore.pending[token].lastName}`.trim() || "Unknown";
+    const uname = accessStore.pending[token].username ? `@${accessStore.pending[token].username}` : "(без username)";
+    await bot.telegram.sendMessage(
+      OWNER_ID,
+      `Новая заявка на доступ:\n${who} ${uname}\nuser_id: ${userId}`,
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback("✅ Approve", `acc:approve:${token}`),
+          Markup.button.callback("❌ Reject", `acc:reject:${token}`),
+        ],
+      ])
+    );
+
+    await ctx.reply("Заявка отправлена владельцу. После одобрения бот начнёт отвечать 🙌", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  await ctx.reply("OWNER_ID не настроен. Передай владельцу, чтобы добавил OWNER_ID в .env", {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+}
+
+async function ensureAllowedOrRequest(ctx) {
+  const userId = getUserId(ctx);
+  if (isAllowedUser(userId)) return true;
+
+  await ctx.reply("Сейчас бот работает по доступу. Нажми кнопку, и я отправлю заявку владельцу.", {
+    ...requestAccessKeyboard(),
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+  return false;
+}
 
 // --- helpers
 
@@ -327,7 +461,142 @@ async function handleFindQuery(ctx, input) {
 
 // --- commands
 
+bot.action("acc:req", async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    await requestAccess(ctx);
+  } catch (e) {
+    console.error(e);
+  }
+});
+
+bot.action(/^acc:(approve|reject):([a-f0-9]+)$/, async (ctx) => {
+  try {
+    const actorId = getUserId(ctx);
+    if (!isOwner(actorId)) {
+      await ctx.answerCbQuery("Только владелец может это делать", { show_alert: true });
+      return;
+    }
+
+    const action = ctx.match?.[1];
+    const token = ctx.match?.[2];
+    const req = accessStore.pending[token];
+    if (!req) {
+      await ctx.answerCbQuery("Заявка уже обработана");
+      return;
+    }
+
+    const userId = Number(req.userId);
+
+    if (action === "approve") {
+      accessStore.allowed.add(userId);
+      delete accessStore.pending[token];
+      await saveAccessStore();
+
+      await ctx.editMessageText(`✅ Доступ выдан пользователю ${userId}`);
+      await ctx.answerCbQuery("Одобрено");
+      await bot.telegram.sendMessage(userId, "✅ Доступ одобрен. Можешь отправлять текст или фото книги.");
+      return;
+    }
+
+    delete accessStore.pending[token];
+    await saveAccessStore();
+    await ctx.editMessageText(`❌ Доступ отклонён для ${userId}`);
+    await ctx.answerCbQuery("Отклонено");
+    await bot.telegram.sendMessage(userId, "❌ Заявка отклонена владельцем.");
+  } catch (e) {
+    console.error(e);
+    await ctx.answerCbQuery("Ошибка");
+  }
+});
+
+bot.command("users", async (ctx) => {
+  const actorId = getUserId(ctx);
+  if (!isOwner(actorId)) return;
+
+  const allowed = [...accessStore.allowed].sort((a, b) => a - b);
+  const pending = Object.values(accessStore.pending);
+  const lines = [
+    `Owner: ${OWNER_ID || "не задан"}`,
+    `Allowed (${allowed.length}): ${allowed.length ? allowed.join(", ") : "—"}`,
+    `Pending (${pending.length}): ${
+      pending.length ? pending.map((p) => `${p.userId}${p.username ? `(@${p.username})` : ""}`).join(", ") : "—"
+    }`,
+    "",
+    "Manual control:",
+    "/allow <user_id> (или reply на сообщение)",
+    "/deny <user_id> (или reply на сообщение)",
+  ];
+
+  await ctx.reply(lines.join("\n"), { message_thread_id: ctx.message?.message_thread_id });
+});
+
+bot.command("allow", async (ctx) => {
+  const actorId = getUserId(ctx);
+  if (!isOwner(actorId)) return;
+
+  const targetId = parseTargetUserId(ctx);
+  if (!targetId) {
+    await ctx.reply("Используй: /allow <user_id> или reply на сообщение пользователя", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  accessStore.allowed.add(Number(targetId));
+
+  // remove pending requests for same user (if any)
+  for (const token of Object.keys(accessStore.pending)) {
+    if (Number(accessStore.pending[token]?.userId) === Number(targetId)) {
+      delete accessStore.pending[token];
+    }
+  }
+
+  await saveAccessStore();
+
+  await ctx.reply(`✅ Добавил в allowlist: ${targetId}`, {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+
+  try {
+    await bot.telegram.sendMessage(targetId, "✅ Доступ выдан владельцем. Можно пользоваться ботом.");
+  } catch {}
+});
+
+bot.command("deny", async (ctx) => {
+  const actorId = getUserId(ctx);
+  if (!isOwner(actorId)) return;
+
+  const targetId = parseTargetUserId(ctx);
+  if (!targetId) {
+    await ctx.reply("Используй: /deny <user_id> или reply на сообщение пользователя", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  accessStore.allowed.delete(Number(targetId));
+
+  for (const token of Object.keys(accessStore.pending)) {
+    if (Number(accessStore.pending[token]?.userId) === Number(targetId)) {
+      delete accessStore.pending[token];
+    }
+  }
+
+  await saveAccessStore();
+
+  await ctx.reply(`❌ Убрал доступ: ${targetId}`, {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+
+  try {
+    await bot.telegram.sendMessage(targetId, "❌ Доступ отозван владельцем.");
+  } catch {}
+});
+
 bot.start(async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
+
   const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
   await ctx.reply(
     "Я могу искать книгу по тексту ИЛИ по фото обложки.\n\nПросто пришли описание книги обычным сообщением или отправь фото обложки.",
@@ -336,6 +605,7 @@ bot.start(async (ctx) => {
 });
 
 bot.help(async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   await ctx.reply(
     "Как пользоваться:\n• Отправь текст (сюжет, цитату, описание) — я найду книгу/автора\n• Или отправь фото обложки\n• Сначала ищу во Флибусте, затем fallback в Google Books\n\nКоманды:\n/find <текст>\n/raw on|off\n/fdebug on|off\n/gdebug on|off",
     { message_thread_id: ctx.message?.message_thread_id }
@@ -343,6 +613,7 @@ bot.help(async (ctx) => {
 });
 
 bot.command("menu", async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
   await ctx.reply("Меню включено. Можешь сразу прислать текст или фото.", {
     ...kb,
@@ -351,24 +622,28 @@ bot.command("menu", async (ctx) => {
 });
 
 bot.hears("🔎 По тексту", async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   await ctx.reply("Пришли описание книги обычным текстом — без /find, я пойму сам.", {
     message_thread_id: ctx.message?.message_thread_id,
   });
 });
 
 bot.hears("📷 По фото", async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   await ctx.reply("Пришли фото обложки (чем крупнее и ровнее — тем лучше).", {
     message_thread_id: ctx.message?.message_thread_id,
   });
 });
 
 bot.hears("ℹ️ Помощь", async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   await ctx.reply("Я умею:\n• распознавать книгу по фото\n• находить книгу по описанию\n• отдавать ссылку на Флибусту или Google Books", {
     message_thread_id: ctx.message?.message_thread_id,
   });
 });
 
 bot.command("raw", async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
 
   if (arg === "on" || arg === "1" || arg === "true") {
@@ -393,6 +668,7 @@ bot.command("raw", async (ctx) => {
 });
 
 bot.command("fdebug", async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
 
   if (arg === "on" || arg === "1" || arg === "true") {
@@ -417,6 +693,7 @@ bot.command("fdebug", async (ctx) => {
 });
 
 bot.command("gdebug", async (ctx) => {
+  if (!(await ensureAllowedOrRequest(ctx))) return;
   const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
 
   if (arg === "on" || arg === "1" || arg === "true") {
@@ -442,6 +719,8 @@ bot.command("gdebug", async (ctx) => {
 
 bot.command("find", async (ctx) => {
   try {
+    if (!(await ensureAllowedOrRequest(ctx))) return;
+
     const input = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim();
     if (!input) {
       await ctx.reply("Напиши так: /find описание книги или что помнишь", {
@@ -463,6 +742,7 @@ bot.command("find", async (ctx) => {
 bot.on("text", async (ctx) => {
   try {
     if (!isAllowedTopic(ctx)) return;
+    if (!(await ensureAllowedOrRequest(ctx))) return;
 
     const text = String(ctx.message?.text || "").trim();
     if (!text) return;
@@ -479,6 +759,7 @@ bot.on("text", async (ctx) => {
 bot.on("photo", async (ctx) => {
   try {
     if (!isAllowedTopic(ctx)) return;
+    if (!(await ensureAllowedOrRequest(ctx))) return;
 
     const photos = ctx.message.photo;
     const best = photos[photos.length - 1];
@@ -572,6 +853,12 @@ bot.on("photo", async (ctx) => {
   }
 });
 
+await loadAccessStore();
+if (OWNER_ID) {
+  accessStore.allowed.add(OWNER_ID);
+  await saveAccessStore();
+}
+
 bot.telegram
   .setMyCommands([
     { command: "find", description: "Найти книгу по описанию" },
@@ -580,6 +867,9 @@ bot.telegram
     { command: "raw", description: "RAW режим Gemini Vision" },
     { command: "fdebug", description: "Дебаг Флибусты" },
     { command: "gdebug", description: "Дебаг Gemini /find" },
+    { command: "users", description: "Список доступов (owner)" },
+    { command: "allow", description: "Выдать доступ (owner)" },
+    { command: "deny", description: "Забрать доступ (owner)" },
   ])
   .catch((e) => console.error("setMyCommands failed:", e?.message || e));
 
