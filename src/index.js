@@ -77,6 +77,21 @@ function isAllowedUser(userId) {
   return accessStore.allowed.has(Number(userId));
 }
 
+function parseTargetUserId(ctx) {
+  const arg = String(ctx.message?.text || "")
+    .split(" ")
+    .slice(1)
+    .join(" ")
+    .trim();
+
+  if (/^\d+$/.test(arg)) return Number(arg);
+
+  const replied = Number(ctx.message?.reply_to_message?.from?.id || 0);
+  if (replied) return replied;
+
+  return 0;
+}
+
 function requestAccessKeyboard() {
   return Markup.inlineKeyboard([[Markup.button.callback("✅ Запросить доступ", "acc:req")]]);
 }
@@ -507,9 +522,76 @@ bot.command("users", async (ctx) => {
     `Pending (${pending.length}): ${
       pending.length ? pending.map((p) => `${p.userId}${p.username ? `(@${p.username})` : ""}`).join(", ") : "—"
     }`,
+    "",
+    "Manual control:",
+    "/allow <user_id> (или reply на сообщение)",
+    "/deny <user_id> (или reply на сообщение)",
   ];
 
   await ctx.reply(lines.join("\n"), { message_thread_id: ctx.message?.message_thread_id });
+});
+
+bot.command("allow", async (ctx) => {
+  const actorId = getUserId(ctx);
+  if (!isOwner(actorId)) return;
+
+  const targetId = parseTargetUserId(ctx);
+  if (!targetId) {
+    await ctx.reply("Используй: /allow <user_id> или reply на сообщение пользователя", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  accessStore.allowed.add(Number(targetId));
+
+  // remove pending requests for same user (if any)
+  for (const token of Object.keys(accessStore.pending)) {
+    if (Number(accessStore.pending[token]?.userId) === Number(targetId)) {
+      delete accessStore.pending[token];
+    }
+  }
+
+  await saveAccessStore();
+
+  await ctx.reply(`✅ Добавил в allowlist: ${targetId}`, {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+
+  try {
+    await bot.telegram.sendMessage(targetId, "✅ Доступ выдан владельцем. Можно пользоваться ботом.");
+  } catch {}
+});
+
+bot.command("deny", async (ctx) => {
+  const actorId = getUserId(ctx);
+  if (!isOwner(actorId)) return;
+
+  const targetId = parseTargetUserId(ctx);
+  if (!targetId) {
+    await ctx.reply("Используй: /deny <user_id> или reply на сообщение пользователя", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return;
+  }
+
+  accessStore.allowed.delete(Number(targetId));
+
+  for (const token of Object.keys(accessStore.pending)) {
+    if (Number(accessStore.pending[token]?.userId) === Number(targetId)) {
+      delete accessStore.pending[token];
+    }
+  }
+
+  await saveAccessStore();
+
+  await ctx.reply(`❌ Убрал доступ: ${targetId}`, {
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+
+  try {
+    await bot.telegram.sendMessage(targetId, "❌ Доступ отозван владельцем.");
+  } catch {}
 });
 
 bot.start(async (ctx) => {
@@ -786,6 +868,8 @@ bot.telegram
     { command: "fdebug", description: "Дебаг Флибусты" },
     { command: "gdebug", description: "Дебаг Gemini /find" },
     { command: "users", description: "Список доступов (owner)" },
+    { command: "allow", description: "Выдать доступ (owner)" },
+    { command: "deny", description: "Забрать доступ (owner)" },
   ])
   .catch((e) => console.error("setMyCommands failed:", e?.message || e));
 
