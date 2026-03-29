@@ -91,15 +91,23 @@ GEMINI_API_KEY=...
 GOOGLE_BOOKS_API_KEY=...
 OWNER_ID=...
 # optional:
-# ALLOWED_THREAD_ID=...
+# DATA_DIR=./data
 # FLIBUSTA_BASE_URL=https://flibusta.is
 # ACCESS_FILE=./data/access.json
+# KINDLE_FILE=./data/kindle.json
 ```
 
 3. Запустить:
 ```bash
 npm start
 ```
+
+## Persistent storage (Railway Volume)
+Если деплои сбрасывают данные (доступы/Kindle email), подключи Volume и задай:
+```
+DATA_DIR=/data
+```
+Тогда файлы `access.json` и `kindle.json` будут сохраняться между деплоями.
 
 ---
 
