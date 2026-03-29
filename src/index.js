@@ -24,8 +24,9 @@ const OWNER_ID = Number(process.env.OWNER_ID || 0);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const ACCESS_FILE = process.env.ACCESS_FILE || path.join(__dirname, "../data/access.json");
-const KINDLE_FILE = process.env.KINDLE_FILE || path.join(__dirname, "../data/kindle.json");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "../data");
+const ACCESS_FILE = process.env.ACCESS_FILE || path.join(DATA_DIR, "access.json");
+const KINDLE_FILE = process.env.KINDLE_FILE || path.join(DATA_DIR, "kindle.json");
 
 const cache = new Map();
 

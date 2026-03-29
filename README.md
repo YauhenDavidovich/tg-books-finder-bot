@@ -104,6 +104,13 @@ OWNER_ID=...
 npm start
 ```
 
+## Persistent storage (Railway Volume)
+Если деплои сбрасывают данные (доступы/Kindle email), подключи Volume и задай:
+```
+DATA_DIR=/data
+```
+Тогда файлы `access.json` и `kindle.json` будут сохраняться между деплоями.
+
 ---
 
 ## Основные команды
