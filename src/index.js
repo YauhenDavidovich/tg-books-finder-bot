@@ -356,20 +356,26 @@ async function sendToKindle({ toEmail, fileUrl, filename }) {
     port,
     secure: port === 465,
     auth: { user, pass },
+    connectionTimeout: 20000,
+    greetingTimeout: 20000,
+    socketTimeout: 20000,
   });
 
-  await transporter.sendMail({
-    from,
-    to: toEmail,
-    subject: "Convert",
-    text: "Send to Kindle",
-    attachments: [
-      {
-        filename,
-        content: buffer,
-      },
-    ],
-  });
+  await Promise.race([
+    transporter.sendMail({
+      from,
+      to: toEmail,
+      subject: "Convert",
+      text: "Send to Kindle",
+      attachments: [
+        {
+          filename,
+          content: buffer,
+        },
+      ],
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("SMTP timeout")), 20000)),
+  ]);
 }
 
 // универсальный подбор попыток для Флибусты (упрощённый, без *_ru и без variants)
@@ -736,9 +742,16 @@ bot.command("smtp_test", async (ctx) => {
       port,
       secure: port === 465,
       auth: { user, pass },
+      connectionTimeout: 20000,
+      greetingTimeout: 20000,
+      socketTimeout: 20000,
     });
 
-    await transporter.verify();
+    await Promise.race([
+      transporter.verify(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("SMTP timeout")), 20000)),
+    ]);
+
     await ctx.reply("✅ SMTP OK", { message_thread_id: ctx.message?.message_thread_id });
   } catch (e) {
     await ctx.reply(`❌ SMTP FAIL: ${String(e?.message || e).slice(0, 500)}`, {
