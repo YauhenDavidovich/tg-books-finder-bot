@@ -95,6 +95,8 @@ OWNER_ID=...
 # FLIBUSTA_BASE_URL=https://flibusta.is
 # ACCESS_FILE=./data/access.json
 # KINDLE_FILE=./data/kindle.json
+# RESEND_API_KEY=...
+# RESEND_FROM=onboarding@resend.dev
 ```
 
 3. Запустить:
