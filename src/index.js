@@ -758,7 +758,10 @@ bot.command("deny", async (ctx) => {
 bot.start(async (ctx) => {
   if (!(await ensureAllowedOrRequest(ctx))) return;
 
-  const kb = Markup.keyboard([["🔎 Find", "📩 Kindle email"]]).resize();
+  const userId = getUserId(ctx);
+  const hasKindle = userId ? Boolean(getKindleEmail(userId)) : false;
+  const kindleLabel = hasKindle ? "✏️ Изменить Kindle email" : "📩 Kindle email";
+  const kb = Markup.keyboard([["🔎 Find", kindleLabel]]).resize();
   await ctx.reply(
     "Нажми 🔎 Find и пришли описание книги (кратко: сюжет/цитата/название/автор).\n\nЕсли отправишь фото обложки — я попробую найти книгу по картинке.",
     { ...kb, message_thread_id: ctx.message?.message_thread_id }
@@ -774,7 +777,7 @@ bot.hears("🔎 Find", async (ctx) => {
   });
 });
 
-bot.hears("📩 Kindle email", async (ctx) => {
+bot.hears(["📩 Kindle email", "✏️ Изменить Kindle email"], async (ctx) => {
   if (!(await ensureAllowedOrRequest(ctx))) return;
   const userId = getUserId(ctx);
   if (userId) pendingKindle.set(userId, true);
@@ -833,7 +836,9 @@ bot.on("text", async (ctx) => {
       kindleStore.emails[String(userId)] = email;
       await saveKindleStore();
 
+      const kb = Markup.keyboard([["🔎 Find", "✏️ Изменить Kindle email"]]).resize();
       await ctx.reply(`Готово! Kindle email сохранён: ${email}`, {
+        ...kb,
         message_thread_id: ctx.message?.message_thread_id,
       });
       return;
