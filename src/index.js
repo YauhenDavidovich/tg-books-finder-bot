@@ -38,6 +38,8 @@ const accessStore = {
   pending: {},
 };
 
+const pendingFind = new Map();
+
 async function loadAccessStore() {
   try {
     const raw = await fs.readFile(ACCESS_FILE, "utf8");
@@ -597,122 +599,18 @@ bot.command("deny", async (ctx) => {
 bot.start(async (ctx) => {
   if (!(await ensureAllowedOrRequest(ctx))) return;
 
-  const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
+  const kb = Markup.keyboard([["🔎 Find"]]).resize();
   await ctx.reply(
-    "Я могу искать книгу по тексту ИЛИ по фото обложки.\n\nПросто пришли описание книги обычным сообщением или отправь фото обложки.",
+    "Нажми 🔎 Find и пришли описание книги (кратко: сюжет/цитата/название/автор).\n\nЕсли отправишь фото обложки — я попробую найти книгу по картинке.",
     { ...kb, message_thread_id: ctx.message?.message_thread_id }
   );
 });
 
-bot.help(async (ctx) => {
+bot.hears("🔎 Find", async (ctx) => {
   if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply(
-    "Как пользоваться:\n• Отправь текст (сюжет, цитату, описание) — я найду книгу/автора\n• Или отправь фото обложки\n• Сначала ищу во Флибусте, затем fallback в Google Books\n\nКоманды:\n/find <текст>\n/raw on|off\n/fdebug on|off\n/gdebug on|off",
-    { message_thread_id: ctx.message?.message_thread_id }
-  );
-});
-
-bot.command("menu", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
-  await ctx.reply("Меню включено. Можешь сразу прислать текст или фото.", {
-    ...kb,
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.hears("🔎 По тексту", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply("Пришли описание книги обычным текстом — без /find, я пойму сам.", {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.hears("📷 По фото", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply("Пришли фото обложки (чем крупнее и ровнее — тем лучше).", {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.hears("ℹ️ Помощь", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply("Я умею:\n• распознавать книгу по фото\n• находить книгу по описанию\n• отдавать ссылку на Флибусту или Google Books", {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.command("raw", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
-
-  if (arg === "on" || arg === "1" || arg === "true") {
-    RAW_MODE = true;
-    await ctx.reply("Ок, буду присылать сырой ответ нейронки (JSON) для каждого фото в этом чате.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  if (arg === "off" || arg === "0" || arg === "false") {
-    RAW_MODE = false;
-    await ctx.reply("Ок, больше не присылаю сырой ответ нейронки.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  await ctx.reply(`RAW_MODE сейчас: ${RAW_MODE ? "on" : "off"}\nКоманды: /raw on, /raw off`, {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.command("fdebug", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
-
-  if (arg === "on" || arg === "1" || arg === "true") {
-    FLIBUSTA_DEBUG = true;
-    await ctx.reply("Ок, включил дебаг Флибусты. Буду показывать результаты запросов.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  if (arg === "off" || arg === "0" || arg === "false") {
-    FLIBUSTA_DEBUG = false;
-    await ctx.reply("Ок, выключил дебаг Флибусты.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  await ctx.reply(`FLIBUSTA_DEBUG сейчас: ${FLIBUSTA_DEBUG ? "on" : "off"}\nКоманды: /fdebug on, /fdebug off`, {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.command("gdebug", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
-
-  if (arg === "on" || arg === "1" || arg === "true") {
-    GEMINI_DEBUG = true;
-    await ctx.reply("Ок, включил Gemini debug. Буду показывать raw ответ Gemini для /find.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  if (arg === "off" || arg === "0" || arg === "false") {
-    GEMINI_DEBUG = false;
-    await ctx.reply("Ок, выключил Gemini debug.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  await ctx.reply(`GEMINI_DEBUG сейчас: ${GEMINI_DEBUG ? "on" : "off"}\nКоманды: /gdebug on, /gdebug off`, {
+  const userId = getUserId(ctx);
+  if (userId) pendingFind.set(userId, true);
+  await ctx.reply("Введи описание книги или название и автора — я начну поиск.", {
     message_thread_id: ctx.message?.message_thread_id,
   });
 });
@@ -723,7 +621,9 @@ bot.command("find", async (ctx) => {
 
     const input = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim();
     if (!input) {
-      await ctx.reply("Напиши так: /find описание книги или что помнишь", {
+      const userId = getUserId(ctx);
+      if (userId) pendingFind.set(userId, true);
+      await ctx.reply("Введи описание книги или название и автора — я начну поиск.", {
         message_thread_id: ctx.message?.message_thread_id,
       });
       return;
@@ -748,6 +648,17 @@ bot.on("text", async (ctx) => {
     if (!text) return;
     if (text.startsWith("/")) return; // commands handled separately
 
+    const userId = getUserId(ctx);
+    const isPending = userId ? pendingFind.get(userId) : false;
+
+    if (!isPending) {
+      await ctx.reply("Нажми 🔎 Find, затем отправь описание книги — я начну поиск.", {
+        message_thread_id: ctx.message?.message_thread_id,
+      });
+      return;
+    }
+
+    if (userId) pendingFind.delete(userId);
     await handleFindQuery(ctx, text);
   } catch (e) {
     console.error(e);
@@ -860,17 +771,7 @@ if (OWNER_ID) {
 }
 
 bot.telegram
-  .setMyCommands([
-    { command: "find", description: "Найти книгу по описанию" },
-    { command: "menu", description: "Показать меню" },
-    { command: "help", description: "Как пользоваться" },
-    { command: "raw", description: "RAW режим Gemini Vision" },
-    { command: "fdebug", description: "Дебаг Флибусты" },
-    { command: "gdebug", description: "Дебаг Gemini /find" },
-    { command: "users", description: "Список доступов (owner)" },
-    { command: "allow", description: "Выдать доступ (owner)" },
-    { command: "deny", description: "Забрать доступ (owner)" },
-  ])
+  .setMyCommands([{ command: "find", description: "Найти книгу по описанию" }])
   .catch((e) => console.error("setMyCommands failed:", e?.message || e));
 
 bot.launch();
