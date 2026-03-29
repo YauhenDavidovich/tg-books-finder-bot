@@ -21,6 +21,7 @@ export function buildFlibustaReplyPayload({
   maxGenres = 3,
   maxEvidence = 3,
   maxDesc = 500,
+  extraButtons = [],
 }) {
   const book = flibustaResult?.book;
   const info = flibustaResult?.info;
@@ -41,7 +42,9 @@ export function buildFlibustaReplyPayload({
 
   const buttons = [];
 
-
+  if (Array.isArray(extraButtons) && extraButtons.length) {
+    buttons.push(...extraButtons);
+  }
 
   const id = String(book.id);
   const mobiRaw = getUrl(id, "mobi");
@@ -74,12 +77,14 @@ export async function replyWithFlibustaResult({
   getUrl,
   cache,
   cacheKey,
+  extraButtons,
 }) {
   const payload = buildFlibustaReplyPayload({
     flibustaResult,
     bestItem,
     toAbsoluteUrl,
     getUrl,
+    extraButtons,
   });
 
   if (!payload) return false;
