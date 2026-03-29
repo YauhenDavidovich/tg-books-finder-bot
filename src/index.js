@@ -652,22 +652,46 @@ bot.action(/^kindle:send:([a-f0-9]+)$/, async (ctx) => {
 
     await ctx.answerCbQuery("Отправляю на Kindle...");
 
+    const progress = await ctx.reply("⌛ Отправляю книгу на Kindle...", {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+
     await sendToKindle({
       toEmail: email,
       fileUrl: payload.fileUrl,
       filename: payload.filename,
     });
 
-    await ctx.reply(`Отправил на Kindle: ${email}`, {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
+    try {
+      await ctx.telegram.editMessageText(
+        ctx.chat?.id,
+        progress?.message_id,
+        undefined,
+        `✅ Книга отправлена на Kindle: ${email}`
+      );
+    } catch {
+      await ctx.reply(`✅ Книга отправлена на Kindle: ${email}`, {
+        message_thread_id: ctx.message?.message_thread_id,
+      });
+    }
   } catch (e) {
     console.error(e);
-    const msg = String(e?.message || e);
-    const hint = msg.includes("SMTP")
-      ? "SMTP не настроен. Нужны SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM в .env"
-      : "Не удалось отправить на Kindle";
-    await ctx.reply(hint, { message_thread_id: ctx.message?.message_thread_id });
+    const msg = String(e?.message || e).toLowerCase();
+    let hint = "Не удалось отправить на Kindle";
+
+    if (msg.includes("smtp")) {
+      hint = "SMTP не настроен. Нужны SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM в .env";
+    } else if (msg.includes("535") || msg.includes("auth")) {
+      hint = "SMTP авторизация не прошла. Проверь SMTP_USER/SMTP_PASS (app password)";
+    } else if (msg.includes("550") || msg.includes("whitelist")) {
+      hint = "Amazon отклонил письмо. Добавь адрес отправителя в Approved Personal Document Email List";
+    } else if (msg.includes("timed out") || msg.includes("timeout")) {
+      hint = "Таймаут при отправке. Попробуй ещё раз или проверь SMTP";
+    } else if (msg.includes("file") && msg.includes("size")) {
+      hint = "Файл слишком большой для отправки на Kindle";
+    }
+
+    await ctx.reply(`❌ ${hint}`, { message_thread_id: ctx.message?.message_thread_id });
   }
 });
 
