@@ -15,6 +15,7 @@
     "dotenv": "^17.2.3",
     "flibusta-api": "^0.2.3",
     "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.15",
     "telegraf": "^4.16.3"
   }
 }

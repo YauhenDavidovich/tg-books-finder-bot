@@ -5,6 +5,7 @@ import fetch from "node-fetch";
 import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
+import nodemailer from "nodemailer";
 
 // ✅ Флибуста, единственная точка импорта flibusta-api сидит внутри провайдера
 import { searchBooks, searchByAuthor, getBookInfo, getUrl } from "./providers/flibustaProvider.js";
@@ -23,6 +24,7 @@ const OWNER_ID = Number(process.env.OWNER_ID || 0);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ACCESS_FILE = process.env.ACCESS_FILE || path.join(__dirname, "../data/access.json");
+const KINDLE_FILE = process.env.KINDLE_FILE || path.join(__dirname, "../data/kindle.json");
 
 const cache = new Map();
 
@@ -37,6 +39,14 @@ const accessStore = {
   allowed: new Set(),
   pending: {},
 };
+
+const kindleStore = {
+  emails: {},
+};
+
+const pendingFind = new Map();
+const pendingKindle = new Map();
+const kindleSendStore = new Map();
 
 async function loadAccessStore() {
   try {
@@ -61,6 +71,26 @@ async function saveAccessStore() {
     updatedAt: new Date().toISOString(),
   };
   await fs.writeFile(ACCESS_FILE, JSON.stringify(payload, null, 2), "utf8");
+}
+
+async function loadKindleStore() {
+  try {
+    const raw = await fs.readFile(KINDLE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    kindleStore.emails = parsed?.emails && typeof parsed.emails === "object" ? parsed.emails : {};
+  } catch {
+    await saveKindleStore();
+  }
+}
+
+async function saveKindleStore() {
+  const dir = path.dirname(KINDLE_FILE);
+  await fs.mkdir(dir, { recursive: true });
+  const payload = {
+    emails: kindleStore.emails || {},
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(KINDLE_FILE, JSON.stringify(payload, null, 2), "utf8");
 }
 
 function getUserId(ctx) {
@@ -90,6 +120,19 @@ function parseTargetUserId(ctx) {
   if (replied) return replied;
 
   return 0;
+}
+
+function getKindleEmail(userId) {
+  if (!userId) return "";
+  return String(kindleStore.emails?.[String(userId)] || "").trim();
+}
+
+function isValidKindleEmail(email) {
+  const s = String(email || "").trim().toLowerCase();
+  if (!s) return false;
+  const basic = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+  if (!basic) return false;
+  return s.endsWith("@kindle.com") || s.endsWith("@free.kindle.com");
 }
 
 function requestAccessKeyboard() {
@@ -222,6 +265,43 @@ function shortTitle(raw) {
   return cut.length >= 4 ? cut : s;
 }
 
+function sanitizeFilename(name, ext) {
+  const base = String(name || "book")
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "book";
+  return `${base}.${ext}`;
+}
+
+function buildKindleButton(ctx, book) {
+  const userId = getUserId(ctx);
+  const email = getKindleEmail(userId);
+  if (!email) return null;
+
+  const id = String(book?.id || "");
+  if (!id) return null;
+
+  const epub = toAbsoluteUrl(getUrl(id, "epub"));
+  const mobi = toAbsoluteUrl(getUrl(id, "mobi"));
+  const fileUrl = epub || mobi;
+  if (!fileUrl) return null;
+
+  const ext = epub ? "epub" : "mobi";
+  const filename = sanitizeFilename(book?.title || "book", ext);
+  const token = crypto.randomBytes(8).toString("hex");
+
+  kindleSendStore.set(token, {
+    userId,
+    email,
+    fileUrl,
+    filename,
+    createdAt: Date.now(),
+  });
+
+  return Markup.button.callback("📩 Send to Kindle", `kindle:send:${token}`);
+}
+
 function formatFlibustaList(list, limit = 5) {
   if (!Array.isArray(list) || list.length === 0) return "пусто";
   return list
@@ -254,6 +334,42 @@ function toAbsoluteUrl(url) {
   if (s.startsWith("http://") || s.startsWith("https://")) return s;
   if (s.startsWith("/")) return `${FLIBUSTA_BASE_URL}${s}`;
   return "";
+}
+
+async function sendToKindle({ toEmail, fileUrl, filename }) {
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.SMTP_FROM || user;
+
+  if (!host || !user || !pass || !from) {
+    throw new Error("SMTP not configured");
+  }
+
+  const res = await fetch(fileUrl);
+  if (!res.ok) throw new Error(`Failed to download file: ${res.status}`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+
+  await transporter.sendMail({
+    from,
+    to: toEmail,
+    subject: "Convert",
+    text: "Send to Kindle",
+    attachments: [
+      {
+        filename,
+        content: buffer,
+      },
+    ],
+  });
 }
 
 // универсальный подбор попыток для Флибусты (упрощённый, без *_ru и без variants)
@@ -419,6 +535,7 @@ async function handleFindQuery(ctx, input) {
 
   const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query || ""}`)}`;
 
+  const kindleButton = flibustaResult?.book ? buildKindleButton(ctx, flibustaResult.book) : null;
   const handled = await replyWithFlibustaResult({
     ctx,
     flibustaResult,
@@ -427,6 +544,7 @@ async function handleFindQuery(ctx, input) {
     getUrl,
     cache,
     cacheKey,
+    extraButtons: kindleButton ? [kindleButton] : [],
   });
 
   if (handled) return;
@@ -507,6 +625,49 @@ bot.action(/^acc:(approve|reject):([a-f0-9]+)$/, async (ctx) => {
   } catch (e) {
     console.error(e);
     await ctx.answerCbQuery("Ошибка");
+  }
+});
+
+bot.action(/^kindle:send:([a-f0-9]+)$/, async (ctx) => {
+  try {
+    const actorId = getUserId(ctx);
+    const token = ctx.match?.[1];
+    const payload = kindleSendStore.get(token);
+
+    if (!payload) {
+      await ctx.answerCbQuery("Ссылка устарела", { show_alert: true });
+      return;
+    }
+
+    if (!actorId || payload.userId !== actorId) {
+      await ctx.answerCbQuery("Эта кнопка не для вас", { show_alert: true });
+      return;
+    }
+
+    const email = getKindleEmail(actorId);
+    if (!email) {
+      await ctx.answerCbQuery("Сначала укажи Kindle email", { show_alert: true });
+      return;
+    }
+
+    await ctx.answerCbQuery("Отправляю на Kindle...");
+
+    await sendToKindle({
+      toEmail: email,
+      fileUrl: payload.fileUrl,
+      filename: payload.filename,
+    });
+
+    await ctx.reply(`Отправил на Kindle: ${email}`, {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+  } catch (e) {
+    console.error(e);
+    const msg = String(e?.message || e);
+    const hint = msg.includes("SMTP")
+      ? "SMTP не настроен. Нужны SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM в .env"
+      : "Не удалось отправить на Kindle";
+    await ctx.reply(hint, { message_thread_id: ctx.message?.message_thread_id });
   }
 });
 
@@ -597,122 +758,27 @@ bot.command("deny", async (ctx) => {
 bot.start(async (ctx) => {
   if (!(await ensureAllowedOrRequest(ctx))) return;
 
-  const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
+  const kb = Markup.keyboard([["🔎 Find", "📩 Kindle email"]]).resize();
   await ctx.reply(
-    "Я могу искать книгу по тексту ИЛИ по фото обложки.\n\nПросто пришли описание книги обычным сообщением или отправь фото обложки.",
+    "Нажми 🔎 Find и пришли описание книги (кратко: сюжет/цитата/название/автор).\n\nЕсли отправишь фото обложки — я попробую найти книгу по картинке.",
     { ...kb, message_thread_id: ctx.message?.message_thread_id }
   );
 });
 
-bot.help(async (ctx) => {
+bot.hears("🔎 Find", async (ctx) => {
   if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply(
-    "Как пользоваться:\n• Отправь текст (сюжет, цитату, описание) — я найду книгу/автора\n• Или отправь фото обложки\n• Сначала ищу во Флибусте, затем fallback в Google Books\n\nКоманды:\n/find <текст>\n/raw on|off\n/fdebug on|off\n/gdebug on|off",
-    { message_thread_id: ctx.message?.message_thread_id }
-  );
-});
-
-bot.command("menu", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const kb = Markup.keyboard([["🔎 По тексту", "📷 По фото"], ["ℹ️ Помощь"]]).resize();
-  await ctx.reply("Меню включено. Можешь сразу прислать текст или фото.", {
-    ...kb,
+  const userId = getUserId(ctx);
+  if (userId) pendingFind.set(userId, true);
+  await ctx.reply("Введи описание книги или название и автора — я начну поиск.", {
     message_thread_id: ctx.message?.message_thread_id,
   });
 });
 
-bot.hears("🔎 По тексту", async (ctx) => {
+bot.hears("📩 Kindle email", async (ctx) => {
   if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply("Пришли описание книги обычным текстом — без /find, я пойму сам.", {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.hears("📷 По фото", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply("Пришли фото обложки (чем крупнее и ровнее — тем лучше).", {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.hears("ℹ️ Помощь", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  await ctx.reply("Я умею:\n• распознавать книгу по фото\n• находить книгу по описанию\n• отдавать ссылку на Флибусту или Google Books", {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.command("raw", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
-
-  if (arg === "on" || arg === "1" || arg === "true") {
-    RAW_MODE = true;
-    await ctx.reply("Ок, буду присылать сырой ответ нейронки (JSON) для каждого фото в этом чате.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  if (arg === "off" || arg === "0" || arg === "false") {
-    RAW_MODE = false;
-    await ctx.reply("Ок, больше не присылаю сырой ответ нейронки.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  await ctx.reply(`RAW_MODE сейчас: ${RAW_MODE ? "on" : "off"}\nКоманды: /raw on, /raw off`, {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.command("fdebug", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
-
-  if (arg === "on" || arg === "1" || arg === "true") {
-    FLIBUSTA_DEBUG = true;
-    await ctx.reply("Ок, включил дебаг Флибусты. Буду показывать результаты запросов.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  if (arg === "off" || arg === "0" || arg === "false") {
-    FLIBUSTA_DEBUG = false;
-    await ctx.reply("Ок, выключил дебаг Флибусты.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  await ctx.reply(`FLIBUSTA_DEBUG сейчас: ${FLIBUSTA_DEBUG ? "on" : "off"}\nКоманды: /fdebug on, /fdebug off`, {
-    message_thread_id: ctx.message?.message_thread_id,
-  });
-});
-
-bot.command("gdebug", async (ctx) => {
-  if (!(await ensureAllowedOrRequest(ctx))) return;
-  const arg = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim().toLowerCase();
-
-  if (arg === "on" || arg === "1" || arg === "true") {
-    GEMINI_DEBUG = true;
-    await ctx.reply("Ок, включил Gemini debug. Буду показывать raw ответ Gemini для /find.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  if (arg === "off" || arg === "0" || arg === "false") {
-    GEMINI_DEBUG = false;
-    await ctx.reply("Ок, выключил Gemini debug.", {
-      message_thread_id: ctx.message?.message_thread_id,
-    });
-    return;
-  }
-
-  await ctx.reply(`GEMINI_DEBUG сейчас: ${GEMINI_DEBUG ? "on" : "off"}\nКоманды: /gdebug on, /gdebug off`, {
+  const userId = getUserId(ctx);
+  if (userId) pendingKindle.set(userId, true);
+  await ctx.reply("Пришли свой Kindle email (например, name@kindle.com).", {
     message_thread_id: ctx.message?.message_thread_id,
   });
 });
@@ -723,7 +789,9 @@ bot.command("find", async (ctx) => {
 
     const input = (ctx.message?.text || "").split(" ").slice(1).join(" ").trim();
     if (!input) {
-      await ctx.reply("Напиши так: /find описание книги или что помнишь", {
+      const userId = getUserId(ctx);
+      if (userId) pendingFind.set(userId, true);
+      await ctx.reply("Введи описание книги или название и автора — я начну поиск.", {
         message_thread_id: ctx.message?.message_thread_id,
       });
       return;
@@ -748,6 +816,37 @@ bot.on("text", async (ctx) => {
     if (!text) return;
     if (text.startsWith("/")) return; // commands handled separately
 
+    const userId = getUserId(ctx);
+    const isPendingFind = userId ? pendingFind.get(userId) : false;
+    const isPendingKindle = userId ? pendingKindle.get(userId) : false;
+
+    if (isPendingKindle) {
+      if (userId) pendingKindle.delete(userId);
+      const email = text.trim().toLowerCase();
+      if (!isValidKindleEmail(email)) {
+        await ctx.reply("Это не похоже на Kindle email. Он должен заканчиваться на @kindle.com или @free.kindle.com", {
+          message_thread_id: ctx.message?.message_thread_id,
+        });
+        return;
+      }
+
+      kindleStore.emails[String(userId)] = email;
+      await saveKindleStore();
+
+      await ctx.reply(`Готово! Kindle email сохранён: ${email}`, {
+        message_thread_id: ctx.message?.message_thread_id,
+      });
+      return;
+    }
+
+    if (!isPendingFind) {
+      await ctx.reply("Нажми 🔎 Find, затем отправь описание книги — я начну поиск.", {
+        message_thread_id: ctx.message?.message_thread_id,
+      });
+      return;
+    }
+
+    if (userId) pendingFind.delete(userId);
     await handleFindQuery(ctx, text);
   } catch (e) {
     console.error(e);
@@ -798,6 +897,7 @@ bot.on("photo", async (ctx) => {
     // 2) PRIORITY: Flibusta
     const flibustaResult = await tryFlibustaFirst(ctx, { title: guessedTitle, author: guessedAuthor });
 
+    const kindleButton = flibustaResult?.book ? buildKindleButton(ctx, flibustaResult.book) : null;
     const handled = await replyWithFlibustaResult({
       ctx,
       flibustaResult,
@@ -806,6 +906,7 @@ bot.on("photo", async (ctx) => {
       getUrl,
       cache,
       cacheKey: hash,
+      extraButtons: kindleButton ? [kindleButton] : [],
     });
 
     if (handled) return;
@@ -854,6 +955,7 @@ bot.on("photo", async (ctx) => {
 });
 
 await loadAccessStore();
+await loadKindleStore();
 if (OWNER_ID) {
   accessStore.allowed.add(OWNER_ID);
   await saveAccessStore();
@@ -862,11 +964,6 @@ if (OWNER_ID) {
 bot.telegram
   .setMyCommands([
     { command: "find", description: "Найти книгу по описанию" },
-    { command: "menu", description: "Показать меню" },
-    { command: "help", description: "Как пользоваться" },
-    { command: "raw", description: "RAW режим Gemini Vision" },
-    { command: "fdebug", description: "Дебаг Флибусты" },
-    { command: "gdebug", description: "Дебаг Gemini /find" },
     { command: "users", description: "Список доступов (owner)" },
     { command: "allow", description: "Выдать доступ (owner)" },
     { command: "deny", description: "Забрать доступ (owner)" },
