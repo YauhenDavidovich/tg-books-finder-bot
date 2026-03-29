@@ -17,7 +17,7 @@ import { replyWithFlibustaResult } from "./helpers/flibustaReply.js";
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-const ALLOWED_THREAD_ID = Number(process.env.ALLOWED_THREAD_ID || 0);
+const ALLOWED_THREAD_ID = 0;
 const BOOKS_KEY = process.env.GOOGLE_BOOKS_API_KEY || "";
 const OWNER_ID = Number(process.env.OWNER_ID || 0);
 
