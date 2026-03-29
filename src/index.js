@@ -823,7 +823,7 @@ bot.on("text", async (ctx) => {
     const isPendingFind = userId ? pendingFind.get(userId) : false;
     const isPendingKindle = userId ? pendingKindle.get(userId) : false;
 
-    if (isPendingKindle) {
+    if (isPendingKindle || isValidKindleEmail(text)) {
       if (userId) pendingKindle.delete(userId);
       const email = text.trim().toLowerCase();
       if (!isValidKindleEmail(email)) {
