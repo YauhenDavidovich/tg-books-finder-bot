@@ -771,7 +771,12 @@ if (OWNER_ID) {
 }
 
 bot.telegram
-  .setMyCommands([{ command: "find", description: "Найти книгу по описанию" }])
+  .setMyCommands([
+    { command: "find", description: "Найти книгу по описанию" },
+    { command: "users", description: "Список доступов (owner)" },
+    { command: "allow", description: "Выдать доступ (owner)" },
+    { command: "deny", description: "Забрать доступ (owner)" },
+  ])
   .catch((e) => console.error("setMyCommands failed:", e?.message || e));
 
 bot.launch();
