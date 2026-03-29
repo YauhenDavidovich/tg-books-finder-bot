@@ -692,6 +692,37 @@ bot.command("users", async (ctx) => {
   await ctx.reply(lines.join("\n"), { message_thread_id: ctx.message?.message_thread_id });
 });
 
+bot.command("smtp_test", async (ctx) => {
+  const actorId = getUserId(ctx);
+  if (!isOwner(actorId)) return;
+
+  try {
+    const host = process.env.SMTP_HOST || "smtp.gmail.com";
+    const port = Number(process.env.SMTP_PORT || 587);
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+
+    if (!user || !pass) {
+      await ctx.reply("SMTP_USER/SMTP_PASS не заданы", { message_thread_id: ctx.message?.message_thread_id });
+      return;
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
+    });
+
+    await transporter.verify();
+    await ctx.reply("✅ SMTP OK", { message_thread_id: ctx.message?.message_thread_id });
+  } catch (e) {
+    await ctx.reply(`❌ SMTP FAIL: ${String(e?.message || e).slice(0, 500)}`, {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+  }
+});
+
 bot.command("allow", async (ctx) => {
   const actorId = getUserId(ctx);
   if (!isOwner(actorId)) return;
@@ -967,6 +998,7 @@ bot.telegram
     { command: "users", description: "Список доступов (owner)" },
     { command: "allow", description: "Выдать доступ (owner)" },
     { command: "deny", description: "Забрать доступ (owner)" },
+    { command: "smtp_test", description: "Проверка SMTP (owner)" },
   ])
   .catch((e) => console.error("setMyCommands failed:", e?.message || e));
 
