@@ -6,6 +6,7 @@ import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
 // ✅ Флибуста, единственная точка импорта flibusta-api сидит внутри провайдера
 import { searchBooks, searchByAuthor, getBookInfo, getUrl } from "./providers/flibustaProvider.js";
@@ -337,6 +338,33 @@ function toAbsoluteUrl(url) {
 }
 
 async function sendToKindle({ toEmail, fileUrl, filename }) {
+  const resendKey = process.env.RESEND_API_KEY;
+  const resendFrom = process.env.RESEND_FROM || "onboarding@resend.dev";
+
+  const res = await fetch(fileUrl);
+  if (!res.ok) throw new Error(`Failed to download file: ${res.status}`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+
+  if (resendKey) {
+    const resend = new Resend(resendKey);
+    await Promise.race([
+      resend.emails.send({
+        from: resendFrom,
+        to: [toEmail],
+        subject: "Convert",
+        text: "Send to Kindle",
+        attachments: [
+          {
+            filename,
+            content: buffer,
+          },
+        ],
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("RESEND timeout")), 20000)),
+    ]);
+    return;
+  }
+
   const host = process.env.SMTP_HOST;
   const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER;
@@ -346,10 +374,6 @@ async function sendToKindle({ toEmail, fileUrl, filename }) {
   if (!host || !user || !pass || !from) {
     throw new Error("SMTP not configured");
   }
-
-  const res = await fetch(fileUrl);
-  if (!res.ok) throw new Error(`Failed to download file: ${res.status}`);
-  const buffer = Buffer.from(await res.arrayBuffer());
 
   const transporter = nodemailer.createTransport({
     host,
@@ -685,14 +709,16 @@ bot.action(/^kindle:send:([a-f0-9]+)$/, async (ctx) => {
     const msg = String(e?.message || e).toLowerCase();
     let hint = "Не удалось отправить на Kindle";
 
-    if (msg.includes("smtp")) {
+    if (msg.includes("resend")) {
+      hint = "Resend не отвечает или ключ неверный. Проверь RESEND_API_KEY/RESEND_FROM";
+    } else if (msg.includes("smtp")) {
       hint = "SMTP не настроен. Нужны SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM в .env";
     } else if (msg.includes("535") || msg.includes("auth")) {
       hint = "SMTP авторизация не прошла. Проверь SMTP_USER/SMTP_PASS (app password)";
     } else if (msg.includes("550") || msg.includes("whitelist")) {
       hint = "Amazon отклонил письмо. Добавь адрес отправителя в Approved Personal Document Email List";
     } else if (msg.includes("timed out") || msg.includes("timeout")) {
-      hint = "Таймаут при отправке. Попробуй ещё раз или проверь SMTP";
+      hint = "Таймаут при отправке. Попробуй ещё раз или проверь SMTP/Resend";
     } else if (msg.includes("file") && msg.includes("size")) {
       hint = "Файл слишком большой для отправки на Kindle";
     }
@@ -727,6 +753,22 @@ bot.command("smtp_test", async (ctx) => {
   if (!isOwner(actorId)) return;
 
   try {
+    if (process.env.RESEND_API_KEY) {
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      await Promise.race([
+        resend.emails.send({
+          from: process.env.RESEND_FROM || "onboarding@resend.dev",
+          to: [process.env.SMTP_USER || "davidovichyauhen@gmail.com"],
+          subject: "SMTP test",
+          text: "Resend OK",
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("RESEND timeout")), 20000)),
+      ]);
+
+      await ctx.reply("✅ RESEND OK", { message_thread_id: ctx.message?.message_thread_id });
+      return;
+    }
+
     const host = process.env.SMTP_HOST || "smtp.gmail.com";
     const port = Number(process.env.SMTP_PORT || 587);
     const user = process.env.SMTP_USER;
