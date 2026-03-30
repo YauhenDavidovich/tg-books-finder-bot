@@ -23,8 +23,10 @@ const OWNER_ID = Number(process.env.OWNER_ID || 0);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const ACCESS_FILE = process.env.ACCESS_FILE || path.join(__dirname, "../data/access.json");
-const KINDLE_FILE = process.env.KINDLE_FILE || path.join(__dirname, "../data/kindle.json");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "../data");
+const ACCESS_FILE = process.env.ACCESS_FILE || path.join(DATA_DIR, "access.json");
+const KINDLE_FILE = process.env.KINDLE_FILE || path.join(DATA_DIR, "kindle.json");
+const LIMITS_FILE = process.env.LIMITS_FILE || path.join(DATA_DIR, "limits.json");
 
 const cache = new Map();
 
@@ -42,6 +44,10 @@ const accessStore = {
 
 const kindleStore = {
   emails: {},
+};
+
+const limitsStore = {
+  daily: {},
 };
 
 const pendingFind = new Map();
@@ -91,6 +97,55 @@ async function saveKindleStore() {
     updatedAt: new Date().toISOString(),
   };
   await fs.writeFile(KINDLE_FILE, JSON.stringify(payload, null, 2), "utf8");
+}
+
+async function loadLimitsStore() {
+  try {
+    const raw = await fs.readFile(LIMITS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    limitsStore.daily = parsed?.daily && typeof parsed.daily === "object" ? parsed.daily : {};
+  } catch {
+    await saveLimitsStore();
+  }
+}
+
+async function saveLimitsStore() {
+  const dir = path.dirname(LIMITS_FILE);
+  await fs.mkdir(dir, { recursive: true });
+  const payload = {
+    daily: limitsStore.daily || {},
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.writeFile(LIMITS_FILE, JSON.stringify(payload, null, 2), "utf8");
+}
+
+const DAILY_LIMIT = Number(process.env.DAILY_LIMIT || 15);
+
+function dayKey(d = new Date()) {
+  return d.toISOString().slice(0, 10);
+}
+
+async function enforceDailyLimit(ctx) {
+  const userId = getUserId(ctx);
+  if (!userId) return false;
+  if (isOwner(userId)) return true;
+  if (!DAILY_LIMIT || DAILY_LIMIT <= 0) return true;
+
+  const key = dayKey();
+  const bucket = limitsStore.daily[key] || {};
+  const used = Number(bucket[userId] || 0);
+
+  if (used >= DAILY_LIMIT) {
+    await ctx.reply(`Лимит ${DAILY_LIMIT} запросов в сутки для пользователя. Попробуй завтра.`, {
+      message_thread_id: ctx.message?.message_thread_id,
+    });
+    return false;
+  }
+
+  bucket[userId] = used + 1;
+  limitsStore.daily[key] = bucket;
+  await saveLimitsStore();
+  return true;
 }
 
 function getUserId(ctx) {
@@ -868,6 +923,7 @@ bot.command("find", async (ctx) => {
       return;
     }
 
+    if (!(await enforceDailyLimit(ctx))) return;
     await handleFindQuery(ctx, input);
   } catch (e) {
     console.error(e);
@@ -920,6 +976,7 @@ bot.on("text", async (ctx) => {
     }
 
     if (userId) pendingFind.delete(userId);
+    if (!(await enforceDailyLimit(ctx))) return;
     await handleFindQuery(ctx, text);
   } catch (e) {
     console.error(e);
@@ -932,6 +989,7 @@ bot.on("photo", async (ctx) => {
   try {
     if (!isAllowedTopic(ctx)) return;
     if (!(await ensureAllowedOrRequest(ctx))) return;
+    if (!(await enforceDailyLimit(ctx))) return;
 
     const photos = ctx.message.photo;
     const best = photos[photos.length - 1];
@@ -1029,6 +1087,7 @@ bot.on("photo", async (ctx) => {
 
 await loadAccessStore();
 await loadKindleStore();
+await loadLimitsStore();
 if (OWNER_ID) {
   accessStore.allowed.add(OWNER_ID);
   await saveAccessStore();
