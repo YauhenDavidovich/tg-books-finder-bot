@@ -95,6 +95,8 @@ OWNER_ID=...
 # FLIBUSTA_BASE_URL=https://flibusta.is
 # ACCESS_FILE=./data/access.json
 # KINDLE_FILE=./data/kindle.json
+# LIMITS_FILE=./data/limits.json
+# DAILY_LIMIT=15
 # RESEND_API_KEY=...
 # RESEND_FROM=onboarding@resend.dev
 ```
