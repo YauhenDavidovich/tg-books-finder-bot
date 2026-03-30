@@ -109,6 +109,11 @@ function isAllowedUser(userId) {
   return accessStore.allowed.has(Number(userId));
 }
 
+function isDebugAllowed(ctx) {
+  const userId = getUserId(ctx);
+  return isOwner(userId);
+}
+
 function parseTargetUserId(ctx) {
   const arg = String(ctx.message?.text || "")
     .split(" ")
@@ -453,7 +458,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
   for (const q of queries) {
     const list = await searchBooks(q, 40);
 
-    if (FLIBUSTA_DEBUG) {
+    if (FLIBUSTA_DEBUG && isDebugAllowed(ctx)) {
       const text =
         `FLIBUSTA searchBooks("${q}") -> ${Array.isArray(list) ? list.length : 0}\n` +
         formatFlibustaList(list, 5);
@@ -466,7 +471,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
   if ((!candidates || candidates.length === 0) && qAuthor) {
     const byA = await searchByAuthor(qAuthor, 80);
 
-    if (FLIBUSTA_DEBUG) {
+    if (FLIBUSTA_DEBUG && isDebugAllowed(ctx)) {
       const text =
         `FLIBUSTA searchByAuthor("${qAuthor}") -> ${Array.isArray(byA) ? byA.length : 0}\n` +
         formatFlibustaList(byA, 5);
@@ -500,7 +505,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
 
   const minScore = qAuthor ? 4 : 4;
 
-  if (FLIBUSTA_DEBUG) {
+  if (FLIBUSTA_DEBUG && isDebugAllowed(ctx)) {
     const picked = best
       ? `bestScore=${bestScore}, minScore=${minScore}\nBEST: ${best.id} | ${best.title}${best.author ? `, ${best.author}` : ""}`
       : `BEST: null`;
@@ -515,7 +520,7 @@ async function tryFlibustaFirst(ctx, { title, author }) {
 
 async function handleFindQuery(ctx, input) {
   // 0) Gemini raw debug: показываем candidateText и finishReason
-  if (GEMINI_DEBUG) {
+  if (GEMINI_DEBUG && isDebugAllowed(ctx)) {
     try {
       const dbg = await geminiDebugBookQueryFromText(input);
       const bodyPreview = String(dbg?.rawBody || "").slice(0, 2000);
@@ -990,7 +995,7 @@ bot.on("photo", async (ctx) => {
     // 1) Gemini Vision: image -> JSON
     const extracted = await geminiExtractBookFromImageBuffer(buffer, "image/jpeg");
 
-    if (RAW_MODE) {
+    if (RAW_MODE && isDebugAllowed(ctx)) {
       const rawText =
         `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` + JSON.stringify(extracted, null, 2);
 
