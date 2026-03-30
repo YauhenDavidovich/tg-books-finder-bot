@@ -16,6 +16,7 @@
     "flibusta-api": "^0.2.3",
     "node-fetch": "^3.3.2",
     "nodemailer": "^6.9.15",
+    "resend": "^2.0.0",
     "telegraf": "^4.16.3"
   }
 }
