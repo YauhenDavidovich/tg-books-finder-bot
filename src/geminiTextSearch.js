@@ -13,19 +13,14 @@ function readAllParts(parts) {
 function buildPrompt(userText) {
   return (
     "You extract book search data from a user's description.\n\n" +
-    "Return ONLY valid minified JSON.\n" +
-    "No markdown. No explanations. No text before or after JSON.\n\n" +
-    'Schema: {"query":string,"title":string|null,"author":string|null,"title_ru":string|null,"author_ru":string|null,"confidence":number}\n\n' +
     "Field rules:\n" +
     "- query: 2–6 words, must be useful for searching a book, include key nouns, no filler words like book/story/novel.\n" +
     "- title: exact title ONLY if you are very sure, otherwise null. Use whatever language you are most confident is the exact title (do not translate unnecessarily).\n" +
     "- author: exact author ONLY if you are very sure, otherwise null.\n" +
-    '- title_ru: the Russian title of the same work, if you know one (translated or original). If title is already Russian, repeat it here. Otherwise null.\n' +
+    "- title_ru: the Russian title of the same work, if you know one (translated or original). If title is already Russian, repeat it here. Otherwise null.\n" +
     '- author_ru: the author\'s name in Russian/Cyrillic spelling, if you know it (e.g. "Стивен Кинг" for "Stephen King"). Otherwise null.\n' +
     "- confidence: 0.9–1.0 famous clearly identified, 0.6–0.8 strong guess, 0.3–0.5 weak guess, 0.0–0.2 almost no idea.\n\n" +
     "Important behavior:\n" +
-    "- NEVER return empty JSON.\n" +
-    "- NEVER omit fields.\n" +
     "- NEVER invent a fake title or author.\n" +
     "- If unsure, still produce the best possible query.\n\n" +
     "User description:\n" +
@@ -34,6 +29,24 @@ function buildPrompt(userText) {
     "\n```"
   );
 }
+
+// Enforced natively via generationConfig.responseSchema below - Gemini's API
+// then guarantees every field is present with the right type, instead of
+// only being told via prompt text to include them (which it wasn't reliably
+// doing: title_ru/author_ru were silently omitted in practice despite the
+// prompt explicitly saying "NEVER omit fields").
+const RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    query: { type: "STRING" },
+    title: { type: "STRING", nullable: true },
+    author: { type: "STRING", nullable: true },
+    title_ru: { type: "STRING", nullable: true },
+    author_ru: { type: "STRING", nullable: true },
+    confidence: { type: "NUMBER" },
+  },
+  required: ["query", "title", "author", "title_ru", "author_ru", "confidence"],
+};
 
 async function geminiCallRaw({ apiKey, prompt, maxOutputTokens }) {
   const url =
@@ -44,7 +57,12 @@ async function geminiCallRaw({ apiKey, prompt, maxOutputTokens }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0, maxOutputTokens },
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens,
+        responseMimeType: "application/json",
+        responseSchema: RESPONSE_SCHEMA,
+      },
     }),
   });
 

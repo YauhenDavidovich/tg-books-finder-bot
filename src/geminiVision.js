@@ -33,7 +33,7 @@ function buildGeminiDebug(data, rawBody, candidateText) {
   };
 }
 
-async function geminiCallJsonImage({ apiKey, prompt, b64, mimeType, maxOutputTokens }) {
+async function geminiCallJsonImage({ apiKey, prompt, b64, mimeType, maxOutputTokens, schema }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   const res = await fetchWithTimeout(url, {
@@ -46,7 +46,11 @@ async function geminiCallJsonImage({ apiKey, prompt, b64, mimeType, maxOutputTok
           parts: [{ text: prompt }, { inlineData: { mimeType, data: b64 } }],
         },
       ],
-      generationConfig: { temperature: 0, maxOutputTokens },
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens,
+        ...(schema ? { responseMimeType: "application/json", responseSchema: schema } : {}),
+      },
     }),
   });
 
@@ -98,6 +102,42 @@ async function geminiCallJsonImage({ apiKey, prompt, b64, mimeType, maxOutputTok
   );
 }
 
+// Enforced natively via generationConfig.responseSchema so Gemini can't
+// silently omit a field (prompt-text-only "Schema: ..." instructions were
+// not reliably honored - see the identical fix in geminiTextSearch.js).
+const EXTRACT_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    items: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          title: { type: "STRING" },
+          author: { type: "STRING", nullable: true },
+          isbn: { type: "STRING", nullable: true },
+          confidence: { type: "NUMBER" },
+          evidence: { type: "ARRAY", items: { type: "STRING" } },
+        },
+        required: ["title", "author", "isbn", "confidence", "evidence"],
+      },
+    },
+  },
+  required: ["items"],
+};
+
+const ENRICH_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    title_en: { type: "STRING", nullable: true },
+    author_en: { type: "STRING", nullable: true },
+    title_ru: { type: "STRING", nullable: true },
+    author_ru: { type: "STRING", nullable: true },
+    variants: { type: "ARRAY", items: { type: "STRING" } },
+  },
+  required: ["title_en", "author_en", "title_ru", "author_ru", "variants"],
+};
+
 function uniqStrings(arr) {
   return [...new Set((arr || []).map((s) => String(s || "").trim()).filter(Boolean))];
 }
@@ -111,10 +151,8 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
   // --- STEP 1: минимум, чтобы почти не обрезало
   const prompt1 =
     "Extract book title/author from the image.\n" +
-    "Return ONLY minified JSON. No markdown.\n" +
-    'Schema: {"items":[{"title":string,"author":string|null,"isbn":string|null,"confidence":number,"evidence":string[]}]}\n' +
     "Rules:\n" +
-    '- Do not invent. If unsure, return {"items":[]}.\n' +
+    "- Do not invent. If unsure, return an empty items array.\n" +
     "- evidence must be exact text seen on the image.\n" +
     "- Ignore UI elements and stickers.\n";
 
@@ -124,6 +162,7 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
     b64,
     mimeType,
     maxOutputTokens: 320,
+    schema: EXTRACT_SCHEMA,
   });
 
   const base = r1.json || {};
@@ -167,8 +206,6 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
   // --- STEP 2: enrich (EN/RU/variants). Если упадёт, вернём baseResult.
   const prompt2 =
     "Enrich extracted book info.\n" +
-    "Return ONLY minified JSON. No markdown.\n" +
-    'Schema: {"title_en":string|null,"author_en":string|null,"title_ru":string|null,"author_ru":string|null,"variants":string[]}\n' +
     "Rules:\n" +
     "- Do not invent if unknown.\n" +
     "- If the cover is EN, try to provide well-known RU translation.\n" +
@@ -186,6 +223,7 @@ export async function geminiExtractBookFromImageBuffer(imageBuffer, mimeType = "
       b64,
       mimeType,
       maxOutputTokens: 260,
+      schema: ENRICH_SCHEMA,
     });
 
     enrich = r2.json || {};
