@@ -15,11 +15,13 @@ function buildPrompt(userText) {
     "You extract book search data from a user's description.\n\n" +
     "Return ONLY valid minified JSON.\n" +
     "No markdown. No explanations. No text before or after JSON.\n\n" +
-    'Schema: {"query":string,"title":string|null,"author":string|null,"confidence":number}\n\n' +
+    'Schema: {"query":string,"title":string|null,"author":string|null,"title_ru":string|null,"author_ru":string|null,"confidence":number}\n\n' +
     "Field rules:\n" +
     "- query: 2–6 words, must be useful for searching a book, include key nouns, no filler words like book/story/novel.\n" +
-    "- title: exact title ONLY if you are very sure, otherwise null.\n" +
+    "- title: exact title ONLY if you are very sure, otherwise null. Use whatever language you are most confident is the exact title (do not translate unnecessarily).\n" +
     "- author: exact author ONLY if you are very sure, otherwise null.\n" +
+    '- title_ru: the Russian title of the same work, if you know one (translated or original). If title is already Russian, repeat it here. Otherwise null.\n' +
+    '- author_ru: the author\'s name in Russian/Cyrillic spelling, if you know it (e.g. "Стивен Кинг" for "Stephen King"). Otherwise null.\n' +
     "- confidence: 0.9–1.0 famous clearly identified, 0.6–0.8 strong guess, 0.3–0.5 weak guess, 0.0–0.2 almost no idea.\n\n" +
     "Important behavior:\n" +
     "- NEVER return empty JSON.\n" +
@@ -130,6 +132,8 @@ export function parseBookQueryResult(r) {
     query: String(json.query || ""),
     title: json.title ?? null,
     author: json.author ?? null,
+    title_ru: json.title_ru ?? null,
+    author_ru: json.author_ru ?? null,
     confidence: Number(json.confidence ?? 0) || 0,
   };
 }

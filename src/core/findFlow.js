@@ -25,6 +25,10 @@ function formatFlibustaList(list, limit = 5) {
 }
 
 // Universal attempt builder for a Gemini text-search query result.
+// Includes the title_ru/author_ru enrichment fields (mirroring
+// buildFlibustaAttemptsFromVisionItem below) since Gemini sometimes answers
+// in English for a famous work (e.g. "We" / "Yevgeny Zamyatin" for "Замятин
+// Мы"), which a Russian-only catalog like Flibusta won't match at all.
 export function buildFlibustaAttemptsFromQuery(q, input) {
   const attempts = [];
   const add = (title, author = null) => {
@@ -34,6 +38,7 @@ export function buildFlibustaAttemptsFromQuery(q, input) {
     attempts.push({ title: t, author: a || null });
   };
 
+  if (q?.title_ru) add(q.title_ru, q.author_ru || q.author || null);
   if (q?.title) add(q.title, q.author || null);
   if (q?.title) add(q.title, null);
   if (q?.query) add(q.query, null);
