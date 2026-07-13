@@ -107,7 +107,13 @@ async function searchFlibustaCandidates(ctx, { title, author }) {
     if (Array.isArray(list) && list.length) candidates = candidates.concat(list);
   }
 
-  if ((!candidates || candidates.length === 0) && qAuthor) {
+  // Always search by author when one is known, not just when the title
+  // search came up empty. A short/generic title (e.g. "Мы") can return a
+  // full page of unrelated books that happen to share that title, using up
+  // the entire result set before the correct author-matched book ever gets
+  // a chance to be scored - searching by author too pools in the book we'd
+  // otherwise miss entirely.
+  if (qAuthor) {
     const byA = await searchByAuthor(qAuthor, 80);
 
     if (config.FLIBUSTA_DEBUG && isDebugAllowed(ctx)) {
