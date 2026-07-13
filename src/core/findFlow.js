@@ -4,10 +4,37 @@ import { norm, scoreMatch, shortTitle } from "./matching.js";
 import { replyChunked } from "./telegramUtils.js";
 import { isDebugAllowed, getUserId } from "../access/accessControl.js";
 import { searchBooks, searchByAuthor, getBookInfo, getUrl, toAbsoluteUrl } from "../providers/flibustaProvider.js";
-import { geminiExtractBookQueryFromText, geminiDebugBookQueryFromText } from "../geminiTextSearch.js";
+import { geminiDebugBookQueryFromText, parseBookQueryResult } from "../geminiTextSearch.js";
 import { findBooksByQuery } from "../googleBooks.js";
 import { replyWithFlibustaResult } from "../helpers/flibustaReply.js";
 import { buildKindleButton } from "../kindle/kindleSender.js";
+
+// scoreMatch's exact-title-only match already lands at 8 (6 exact + 2
+// token-overlap stacking bonus - see PRIORITIZED_FINDINGS.md), so treat 8+
+// as "confident enough to stop looking further" and skip the remaining,
+// weaker attempts. Below that, keep trying every attempt and keep whichever
+// scores highest overall, instead of stopping at the first one that merely
+// clears tryFlibustaFirst's own (much lower) minScore=4 acceptance bar.
+const STRONG_MATCH_SCORE = 8;
+
+// Tries every attempt and keeps the best-scoring result, short-circuiting
+// only once a strong match is found. Fixes a real bug: stopping at the
+// first attempt to clear minScore=4 could lock in a weak false-positive
+// (e.g. an English phrase substring-matching an unrelated book's bracketed
+// alternate title) before a later, more specific attempt got a chance.
+export async function pickBestFlibustaResult(ctx, attempts) {
+  let best = null;
+
+  for (const a of attempts) {
+    const result = await tryFlibustaFirst(ctx, a);
+    if (result?.book && (!best || result.score > best.score)) {
+      best = result;
+    }
+    if (best && best.score >= STRONG_MATCH_SCORE) break;
+  }
+
+  return best;
+}
 
 function formatFlibustaList(list, limit = 5) {
   if (!Array.isArray(list) || list.length === 0) return "пусто";
@@ -146,25 +173,27 @@ export async function tryFlibustaFirst(ctx, { title, author }) {
 }
 
 export async function handleFindQuery({ ctx, input, db, cache }) {
-  if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
-    try {
-      const dbg = await geminiDebugBookQueryFromText(input);
-      const bodyPreview = String(dbg?.rawBody || "").slice(0, 2000);
-      const candPreview = String(dbg?.candidateText || "").slice(0, 2000);
-      const infoText =
-        `GEMINI DEBUG\n` +
-        `finishReason: ${dbg?.finishReason || "-"}\n` +
-        `status: ${dbg?.status ?? "-"}\n\n` +
-        `candidateText:\n${candPreview || "(empty)"}\n\n` +
-        `rawBody preview:\n${bodyPreview || "(empty)"}`;
+  // Fetch Gemini exactly once and reuse it for both the debug preview and
+  // the actual parsed query - two independent calls aren't guaranteed to
+  // agree (Gemini 2.5 Flash's "thinking" adds variance even at temperature
+  // 0), which previously let the debug preview show one answer while a
+  // second, separate call silently returned a different one for the search.
+  const raw = await geminiDebugBookQueryFromText(input);
 
-      await replyChunked(ctx, infoText);
-    } catch (e) {
-      await replyChunked(ctx, `GEMINI DEBUG ERROR:\n${String(e?.message || e).slice(0, 3500)}`);
-    }
+  if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
+    const bodyPreview = String(raw?.rawBody || "").slice(0, 2000);
+    const candPreview = String(raw?.candidateText || "").slice(0, 2000);
+    const infoText =
+      `GEMINI DEBUG\n` +
+      `finishReason: ${raw?.finishReason || "-"}\n` +
+      `status: ${raw?.status ?? "-"}\n\n` +
+      `candidateText:\n${candPreview || "(empty)"}\n\n` +
+      `rawBody preview:\n${bodyPreview || "(empty)"}`;
+
+    await replyChunked(ctx, infoText);
   }
 
-  const q = await geminiExtractBookQueryFromText(input);
+  const q = parseBookQueryResult(raw);
   const conf = Number(q?.confidence ?? 0) || 0;
 
   if (!q?.query) {
@@ -188,12 +217,7 @@ export async function handleFindQuery({ ctx, input, db, cache }) {
   };
 
   const attempts = buildFlibustaAttemptsFromQuery(q, input);
-
-  let flibustaResult = null;
-  for (const a of attempts) {
-    flibustaResult = await tryFlibustaFirst(ctx, a);
-    if (flibustaResult?.book) break;
-  }
+  const flibustaResult = await pickBestFlibustaResult(ctx, attempts);
 
   const userId = getUserId(ctx);
   const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query || ""}`)}`;

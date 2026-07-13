@@ -5,7 +5,7 @@ import { isAllowedTopic, downloadTelegramFile, replyChunked } from "../core/tele
 import { ensureAllowedOrRequest, isDebugAllowed, getUserId } from "../access/accessControl.js";
 import { enforceDailyLimit } from "./dailyLimit.js";
 import { geminiExtractBookFromImageBuffer } from "../geminiVision.js";
-import { buildFlibustaAttemptsFromVisionItem, tryFlibustaFirst } from "../core/findFlow.js";
+import { buildFlibustaAttemptsFromVisionItem, pickBestFlibustaResult } from "../core/findFlow.js";
 import { buildKindleButton } from "../kindle/kindleSender.js";
 import { replyWithFlibustaResult } from "../helpers/flibustaReply.js";
 import { findBookByTitleAuthor } from "../googleBooks.js";
@@ -56,12 +56,7 @@ export function registerPhotoHandler(bot, db, cache) {
       // RU/EN enrichment variants (title_ru/author_ru, variants[]) instead
       // of only the original guess (see P0-1 in PRIORITIZED_FINDINGS.md).
       const attempts = buildFlibustaAttemptsFromVisionItem(bestItem);
-
-      let flibustaResult = null;
-      for (const a of attempts) {
-        flibustaResult = await tryFlibustaFirst(ctx, a);
-        if (flibustaResult?.book) break;
-      }
+      const flibustaResult = await pickBestFlibustaResult(ctx, attempts);
 
       const userId = getUserId(ctx);
       const kindleButton = flibustaResult?.book ? buildKindleButton(db, userId, flibustaResult.book) : null;

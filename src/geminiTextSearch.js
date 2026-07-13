@@ -103,16 +103,18 @@ export async function geminiDebugBookQueryFromText(userText) {
   });
 }
 
-// Основная функция: ничего не чиним, просто parse как есть
-export async function geminiExtractBookQueryFromText(userText) {
-  const r = await geminiDebugBookQueryFromText(userText);
-
-  // если запрос вообще не удался, кидаем ошибку с rawBody
+// Parses an already-fetched geminiCallRaw() result. Split out from
+// geminiExtractBookQueryFromText so a caller that already fetched the raw
+// response (e.g. for a debug preview) can parse that same response instead
+// of making a second, independent Gemini call - two separate calls aren't
+// guaranteed to agree (Gemini 2.5 Flash's "thinking" adds variance even at
+// temperature 0), which previously let the debug preview and the actual
+// search silently disagree.
+export function parseBookQueryResult(r) {
   if (!r.ok) {
     throw new Error(`Gemini error: ${r.status}\n${r.rawBody}`);
   }
 
-  // если candidateText пустой, тоже ошибка
   if (!r.candidateText) {
     throw new Error(
       `Gemini returned empty candidateText.\nfinishReason=${r.finishReason || "-"}\nraw:\n${(r.rawBody || "").slice(0, 1200)}`
@@ -130,4 +132,10 @@ export async function geminiExtractBookQueryFromText(userText) {
     author: json.author ?? null,
     confidence: Number(json.confidence ?? 0) || 0,
   };
+}
+
+// Основная функция: ничего не чиним, просто parse как есть
+export async function geminiExtractBookQueryFromText(userText) {
+  const r = await geminiDebugBookQueryFromText(userText);
+  return parseBookQueryResult(r);
 }
