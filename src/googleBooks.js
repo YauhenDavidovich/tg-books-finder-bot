@@ -1,4 +1,4 @@
-import fetch from "node-fetch";
+import { fetchWithTimeout as fetch } from "./core/fetchWithTimeout.js";
 
 function buildUrl(title, author, apiKey) {
   const base = "https://www.googleapis.com/books/v1/volumes";

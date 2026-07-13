@@ -1,4 +1,5 @@
-import fetch from "node-fetch";
+import { parseJsonLoose } from "./gemini/jsonExtract.js";
+import { fetchWithTimeout } from "./core/fetchWithTimeout.js";
 
 function readAllParts(parts) {
   if (!Array.isArray(parts)) return "";
@@ -36,7 +37,7 @@ async function geminiCallRaw({ apiKey, prompt, maxOutputTokens }) {
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -118,8 +119,9 @@ export async function geminiExtractBookQueryFromText(userText) {
     );
   }
 
-  // тут принципиально: без strip/extract/repair
-  const json = JSON.parse(r.candidateText);
+  // Same strip/extract/repair pipeline used by geminiVision.js, so a stray
+  // markdown fence or a truncated response doesn't crash text search.
+  const json = parseJsonLoose(r.candidateText);
 
   // минимальная нормализация типов, без умничанья
   return {

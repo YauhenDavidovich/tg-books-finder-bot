@@ -7,6 +7,7 @@ import {
     downBook as downBookApi,
     getUrl as getUrlApi
   } from "flibusta-api";
+  import { config } from "../config.js";
   
   // --- helpers
   
@@ -116,6 +117,14 @@ import {
   export function getUrl(id, format = "mobi") {
     const bookId = normalizeId(id);
     if (!bookId) return "";
-  
+
     return getUrlApi(bookId, format);
+  }
+
+  export function toAbsoluteUrl(url) {
+    const s = String(url ?? "").trim();
+    if (!s) return "";
+    if (s.startsWith("http://") || s.startsWith("https://")) return s;
+    if (s.startsWith("/")) return `${config.FLIBUSTA_BASE_URL}${s}`;
+    return "";
   }

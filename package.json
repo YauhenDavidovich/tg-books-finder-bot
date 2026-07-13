@@ -4,17 +4,17 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test test/"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@google-cloud/vision": "^5.3.4",
+    "better-sqlite3": "^11.3.0",
     "dotenv": "^17.2.3",
     "flibusta-api": "^0.2.3",
-    "node-fetch": "^3.3.2",
     "nodemailer": "^6.9.15",
     "resend": "^2.0.0",
     "telegraf": "^4.16.3"

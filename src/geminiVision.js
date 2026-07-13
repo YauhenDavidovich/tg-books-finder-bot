@@ -1,19 +1,5 @@
-import fetch from "node-fetch";
-
-function stripCodeFences(s) {
-  return (s || "")
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
-}
-
-function extractJsonObject(s) {
-  const first = s.indexOf("{");
-  const last = s.lastIndexOf("}");
-  if (first === -1 || last === -1 || last <= first) return null;
-  return s.slice(first, last + 1);
-}
+import { stripCodeFences, extractJsonObject, tryRepairTruncatedJson } from "./gemini/jsonExtract.js";
+import { fetchWithTimeout } from "./core/fetchWithTimeout.js";
 
 function readAllParts(parts) {
   if (!Array.isArray(parts)) return { text: "", partsPreview: [] };
@@ -33,50 +19,6 @@ function readAllParts(parts) {
   return { text, partsPreview };
 }
 
-// пытаемся восстановить обрезанный JSON: закрываем кавычки, ] и }
-function tryRepairTruncatedJson(s) {
-  if (!s) return null;
-  const str = String(s).trim();
-  if (!str.startsWith("{")) return null;
-
-  const stack = [];
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\" && inString) {
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-
-    if (ch === "{") stack.push("}");
-    else if (ch === "[") stack.push("]");
-    else if (ch === "}" || ch === "]") {
-      if (stack.length && stack[stack.length - 1] === ch) stack.pop();
-    }
-  }
-
-  let repaired = str;
-
-  if (inString) repaired += '"';
-  repaired = repaired.replace(/,\s*$/, "");
-  while (stack.length) repaired += stack.pop();
-  if (!repaired.endsWith("}")) repaired += "}";
-
-  return repaired;
-}
-
 function buildGeminiDebug(data, rawBody, candidateText) {
   const cand = data?.candidates?.[0];
   const finishReason = cand?.finishReason || null;
@@ -94,7 +36,7 @@ function buildGeminiDebug(data, rawBody, candidateText) {
 async function geminiCallJsonImage({ apiKey, prompt, b64, mimeType, maxOutputTokens }) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
