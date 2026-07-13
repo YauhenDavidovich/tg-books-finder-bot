@@ -1,40 +1,15 @@
+import crypto from "crypto";
 import { Markup } from "telegraf";
 import { config } from "../config.js";
 import { norm, scoreMatch, shortTitle } from "./matching.js";
 import { replyChunked } from "./telegramUtils.js";
 import { isDebugAllowed, getUserId } from "../access/accessControl.js";
-import { searchBooks, searchByAuthor, getBookInfo, getUrl, toAbsoluteUrl } from "../providers/flibustaProvider.js";
+import { searchBooks, searchByAuthor, getBookInfo } from "../providers/flibustaProvider.js";
 import { geminiDebugBookQueryFromText, parseBookQueryResult } from "../geminiTextSearch.js";
 import { findBooksByQuery } from "../googleBooks.js";
-import { replyWithFlibustaResult } from "../helpers/flibustaReply.js";
-import { buildKindleButton } from "../kindle/kindleSender.js";
+import { createBoundedCache } from "./cache.js";
 
-// scoreMatch's exact-title-only match already lands at 8 (6 exact + 2
-// token-overlap stacking bonus - see PRIORITIZED_FINDINGS.md), so treat 8+
-// as "confident enough to stop looking further" and skip the remaining,
-// weaker attempts. Below that, keep trying every attempt and keep whichever
-// scores highest overall, instead of stopping at the first one that merely
-// clears tryFlibustaFirst's own (much lower) minScore=4 acceptance bar.
-const STRONG_MATCH_SCORE = 8;
-
-// Tries every attempt and keeps the best-scoring result, short-circuiting
-// only once a strong match is found. Fixes a real bug: stopping at the
-// first attempt to clear minScore=4 could lock in a weak false-positive
-// (e.g. an English phrase substring-matching an unrelated book's bracketed
-// alternate title) before a later, more specific attempt got a chance.
-export async function pickBestFlibustaResult(ctx, attempts) {
-  let best = null;
-
-  for (const a of attempts) {
-    const result = await tryFlibustaFirst(ctx, a);
-    if (result?.book && (!best || result.score > best.score)) {
-      best = result;
-    }
-    if (best && best.score >= STRONG_MATCH_SCORE) break;
-  }
-
-  return best;
-}
+const MAX_CANDIDATES = 5;
 
 function formatFlibustaList(list, limit = 5) {
   if (!Array.isArray(list) || list.length === 0) return "пусто";
@@ -101,12 +76,15 @@ function dedupAttempts(attempts) {
   return uniq;
 }
 
-export async function tryFlibustaFirst(ctx, { title, author }) {
+// Searches Flibusta for one title/author attempt and returns every
+// deduped candidate with its score (not just the best one), so callers can
+// pool candidates across several attempts before deciding anything.
+async function searchFlibustaCandidates(ctx, { title, author }) {
   const fullTitle = String(title ?? "").trim();
   const qAuthor = String(author ?? "").trim();
   const tShort = shortTitle(fullTitle);
 
-  if (!tShort) return null;
+  if (!tShort) return [];
 
   const queriesRaw = [qAuthor ? `${tShort} ${qAuthor}` : tShort, tShort, fullTitle].filter(Boolean);
   const queries = [...new Set(queriesRaw)];
@@ -135,8 +113,6 @@ export async function tryFlibustaFirst(ctx, { title, author }) {
     if (Array.isArray(byA) && byA.length) candidates = candidates.concat(byA);
   }
 
-  if (!candidates.length) return null;
-
   const uniq = [];
   const seen = new Set();
   for (const b of candidates) {
@@ -146,30 +122,96 @@ export async function tryFlibustaFirst(ctx, { title, author }) {
     uniq.push(b);
   }
 
-  let best = null;
-  let bestScore = -1;
+  return uniq.map((book) => ({ book, score: scoreMatch(book, tShort, qAuthor) }));
+}
 
-  for (const b of uniq) {
-    const s = scoreMatch(b, tShort, qAuthor);
-    if (s > bestScore) {
-      bestScore = s;
-      best = b;
+// Pools candidates across every attempt (deduped by book id, keeping the
+// highest score seen for each), instead of stopping at the first attempt
+// that clears some threshold. That earlier approach could lock in a weak
+// false-positive (e.g. an English phrase substring-matching an unrelated
+// book's bracketed alternate title) before a later, more specific attempt -
+// like the user's original untranslated input - got a chance to run at all.
+export async function pickFlibustaCandidates(ctx, attempts, limit = MAX_CANDIDATES) {
+  const byId = new Map();
+
+  for (const attempt of attempts) {
+    const scored = await searchFlibustaCandidates(ctx, attempt);
+    for (const { book, score } of scored) {
+      const id = String(book?.id ?? "");
+      if (!id) continue;
+      const existing = byId.get(id);
+      if (!existing || score > existing.score) byId.set(id, { book, score });
     }
   }
 
-  const minScore = qAuthor ? 4 : 4;
+  const ranked = [...byId.values()]
+    .filter((c) => c.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
 
   if (config.FLIBUSTA_DEBUG && isDebugAllowed(ctx)) {
-    const picked = best
-      ? `bestScore=${bestScore}, minScore=${minScore}\nBEST: ${best.id} | ${best.title}${best.author ? `, ${best.author}` : ""}`
-      : `BEST: null`;
-    await replyChunked(ctx, `FLIBUSTA picked:\n${picked}`);
+    const text = ranked.length
+      ? ranked.map((c, i) => `${i + 1}) score=${c.score} | ${c.book.id} | ${c.book.title}${c.book.author ? `, ${c.book.author}` : ""}`).join("\n")
+      : "пусто";
+    await replyChunked(ctx, `FLIBUSTA candidates (pooled, top ${limit}):\n${text}`);
   }
 
-  if (!best || bestScore < minScore) return null;
+  return ranked;
+}
 
-  const info = await getBookInfo(best.id);
-  return { book: best, info, score: bestScore };
+// --- candidate picker UI (user always picks, per product decision) ---
+
+// Bounded like the photo/text result cache (core/cache.js) - unpicked
+// candidate lists shouldn't accumulate forever if users abandon them.
+const pendingCandidatePicks = createBoundedCache(500);
+
+function candidateButtonLabel(index) {
+  return String(index + 1);
+}
+
+function candidateLine(index, book) {
+  const t = String(book?.title ?? "").slice(0, 90);
+  const a = String(book?.author ?? "").slice(0, 60);
+  return `${index + 1}) ${t}${a ? `, ${a}` : ""}`;
+}
+
+// Shows the pooled candidates as numbered inline buttons and stores enough
+// context (in-memory only - short-lived, like the Kindle-send tokens) for
+// the bot.action handler in bot/actions.js to resolve a tap into a full
+// reply. `onNone` is called if the user says none of the candidates match,
+// letting each caller (text search vs photo search) define its own
+// Google Books fallback without this module needing to know which one.
+export async function presentFlibustaCandidates(ctx, { candidates, bestItem, cache, cacheKey, onNone }) {
+  const userId = getUserId(ctx);
+  const token = crypto.randomBytes(8).toString("hex");
+
+  pendingCandidatePicks.set(token, { userId, candidates, bestItem, cache, cacheKey, onNone, createdAt: Date.now() });
+
+  const lines = candidates.map((c, i) => candidateLine(i, c.book));
+  const text = `Нашёл во Флибусте несколько вариантов, выбери нужный:\n\n${lines.join("\n")}`;
+
+  const pickButtons = candidates.map((c, i) => Markup.button.callback(candidateButtonLabel(i), `flib:pick:${token}:${i}`));
+  const rows = [];
+  for (let i = 0; i < pickButtons.length; i += MAX_CANDIDATES) rows.push(pickButtons.slice(i, i + MAX_CANDIDATES));
+  rows.push([Markup.button.callback("❌ Ничего не подходит", `flib:pick:${token}:none`)]);
+
+  await ctx.reply(text, {
+    ...Markup.inlineKeyboard(rows),
+    message_thread_id: ctx.message?.message_thread_id,
+  });
+}
+
+export function getCandidatePickPayload(token) {
+  return pendingCandidatePicks.get(token);
+}
+
+export function clearCandidatePick(token) {
+  pendingCandidatePicks.delete(token);
+}
+
+export async function fetchFlibustaResultForCandidate(candidate) {
+  const info = await getBookInfo(candidate.book.id);
+  return { book: candidate.book, info, score: candidate.score };
 }
 
 export async function handleFindQuery({ ctx, input, db, cache }) {
@@ -217,25 +259,24 @@ export async function handleFindQuery({ ctx, input, db, cache }) {
   };
 
   const attempts = buildFlibustaAttemptsFromQuery(q, input);
-  const flibustaResult = await pickBestFlibustaResult(ctx, attempts);
-
-  const userId = getUserId(ctx);
+  const candidates = await pickFlibustaCandidates(ctx, attempts);
   const cacheKey = `find:${norm(`${q.title || ""} ${q.author || ""} ${q.query || ""}`)}`;
-  const kindleButton = flibustaResult?.book ? buildKindleButton(db, userId, flibustaResult.book) : null;
 
-  const handled = await replyWithFlibustaResult({
-    ctx,
-    flibustaResult,
-    bestItem: pseudoBestItem,
-    toAbsoluteUrl,
-    getUrl,
-    cache,
-    cacheKey,
-    extraButtons: kindleButton ? [kindleButton] : [],
-  });
+  if (candidates.length) {
+    await presentFlibustaCandidates(ctx, {
+      candidates,
+      bestItem: pseudoBestItem,
+      cache,
+      cacheKey,
+      onNone: (ctx2) => runGoogleBooksFallback(ctx2, q),
+    });
+    return;
+  }
 
-  if (handled) return;
+  await runGoogleBooksFallback(ctx, q);
+}
 
+async function runGoogleBooksFallback(ctx, q) {
   const parts = [];
   if (q.title) parts.push(`intitle:"${q.title}"`);
   if (q.author) parts.push(`inauthor:"${q.author}"`);

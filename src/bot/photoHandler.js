@@ -2,17 +2,47 @@ import crypto from "crypto";
 import { Markup } from "telegraf";
 import { config } from "../config.js";
 import { isAllowedTopic, downloadTelegramFile, replyChunked } from "../core/telegramUtils.js";
-import { ensureAllowedOrRequest, isDebugAllowed, getUserId } from "../access/accessControl.js";
+import { ensureAllowedOrRequest, isDebugAllowed } from "../access/accessControl.js";
 import { enforceDailyLimit } from "./dailyLimit.js";
 import { geminiExtractBookFromImageBuffer } from "../geminiVision.js";
-import { buildFlibustaAttemptsFromVisionItem, pickBestFlibustaResult } from "../core/findFlow.js";
-import { buildKindleButton } from "../kindle/kindleSender.js";
-import { replyWithFlibustaResult } from "../helpers/flibustaReply.js";
+import { buildFlibustaAttemptsFromVisionItem, pickFlibustaCandidates, presentFlibustaCandidates } from "../core/findFlow.js";
 import { findBookByTitleAuthor } from "../googleBooks.js";
-import { toAbsoluteUrl, getUrl } from "../providers/flibustaProvider.js";
 
 function sha256(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+async function runGoogleBooksFallback(ctx, bestItem, cache, cacheKey) {
+  const guessedTitle = bestItem.title;
+  const guessedAuthor = bestItem.author || null;
+  const book = await findBookByTitleAuthor({ title: guessedTitle, author: guessedAuthor }, config.GOOGLE_BOOKS_API_KEY);
+
+  if (!book?.title) {
+    await ctx.reply(
+      `Похоже на: ${guessedTitle}${guessedAuthor ? `, ${guessedAuthor}` : ""}\nНе нашёл во Флибусте и не смог подтвердить в Google Books.`,
+      { message_thread_id: ctx.message?.message_thread_id }
+    );
+    return;
+  }
+
+  const url =
+    book.canonicalLink ||
+    `https://www.google.com/search?q=${encodeURIComponent(`${book.title} ${book.authors?.[0] || ""}`.trim())}`;
+
+  const extra = Markup.inlineKeyboard([[Markup.button.url("Google Books", url)]]);
+
+  const author = book.authors?.[0] ? `, ${book.authors[0]}` : "";
+  const evidence =
+    Array.isArray(bestItem.evidence) && bestItem.evidence.length ? bestItem.evidence.slice(0, 3).join(" | ") : "-";
+
+  const msg =
+    `Нашёл так:\n\n• ${book.title}${author}\n` +
+    `\nУверенность: ${(bestItem.confidence ?? 0).toFixed(2)}\n` +
+    `Доказательства: ${evidence}` +
+    `\n\nФлибуста не дала уверенного совпадения, поэтому показал Google Books.`;
+
+  await ctx.reply(msg, { ...extra, message_thread_id: ctx.message?.message_thread_id });
+  if (cache && cacheKey != null) cache.set(cacheKey, { text: msg, extra });
 }
 
 export function registerPhotoHandler(bot, db, cache) {
@@ -56,54 +86,21 @@ export function registerPhotoHandler(bot, db, cache) {
       // RU/EN enrichment variants (title_ru/author_ru, variants[]) instead
       // of only the original guess (see P0-1 in PRIORITIZED_FINDINGS.md).
       const attempts = buildFlibustaAttemptsFromVisionItem(bestItem);
-      const flibustaResult = await pickBestFlibustaResult(ctx, attempts);
+      const candidates = await pickFlibustaCandidates(ctx, attempts);
 
-      const userId = getUserId(ctx);
-      const kindleButton = flibustaResult?.book ? buildKindleButton(db, userId, flibustaResult.book) : null;
-      const handled = await replyWithFlibustaResult({
-        ctx,
-        flibustaResult,
-        bestItem,
-        toAbsoluteUrl,
-        getUrl,
-        cache,
-        cacheKey: hash,
-        extraButtons: kindleButton ? [kindleButton] : [],
-      });
-
-      if (handled) return;
-
-      // 3) Fallback: Google Books confirm
-      const guessedTitle = bestItem.title;
-      const guessedAuthor = bestItem.author || null;
-      const book = await findBookByTitleAuthor({ title: guessedTitle, author: guessedAuthor }, config.GOOGLE_BOOKS_API_KEY);
-
-      if (!book?.title) {
-        await ctx.reply(
-          `Похоже на: ${guessedTitle}${guessedAuthor ? `, ${guessedAuthor}` : ""}\nНе нашёл во Флибусте и не смог подтвердить в Google Books.`,
-          { message_thread_id: ctx.message.message_thread_id }
-        );
+      if (candidates.length) {
+        await presentFlibustaCandidates(ctx, {
+          candidates,
+          bestItem,
+          cache,
+          cacheKey: hash,
+          onNone: (ctx2) => runGoogleBooksFallback(ctx2, bestItem, cache, hash),
+        });
         return;
       }
 
-      const url =
-        book.canonicalLink ||
-        `https://www.google.com/search?q=${encodeURIComponent(`${book.title} ${book.authors?.[0] || ""}`.trim())}`;
-
-      const extra = Markup.inlineKeyboard([[Markup.button.url("Google Books", url)]]);
-
-      const author = book.authors?.[0] ? `, ${book.authors[0]}` : "";
-      const evidence =
-        Array.isArray(bestItem.evidence) && bestItem.evidence.length ? bestItem.evidence.slice(0, 3).join(" | ") : "-";
-
-      const msg =
-        `Нашёл так:\n\n• ${book.title}${author}\n` +
-        `\nУверенность: ${(bestItem.confidence ?? 0).toFixed(2)}\n` +
-        `Доказательства: ${evidence}` +
-        `\n\nФлибуста не дала уверенного совпадения, поэтому показал Google Books.`;
-
-      await ctx.reply(msg, { ...extra, message_thread_id: ctx.message.message_thread_id });
-      cache.set(hash, { text: msg, extra });
+      // 3) Fallback: Google Books confirm
+      await runGoogleBooksFallback(ctx, bestItem, cache, hash);
     } catch (e) {
       console.error(e);
 

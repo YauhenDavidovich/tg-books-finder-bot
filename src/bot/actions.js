@@ -1,6 +1,9 @@
 import { getUserId, isOwner, requestAccess, approveRequest, rejectRequest } from "../access/accessControl.js";
 import { getKindleEmail } from "../kindle/kindleEmail.js";
-import { getKindleSendPayload, sendToKindle, kindleErrorHint } from "../kindle/kindleSender.js";
+import { getKindleSendPayload, sendToKindle, kindleErrorHint, buildKindleButton } from "../kindle/kindleSender.js";
+import { getCandidatePickPayload, clearCandidatePick, fetchFlibustaResultForCandidate } from "../core/findFlow.js";
+import { replyWithFlibustaResult } from "../helpers/flibustaReply.js";
+import { toAbsoluteUrl, getUrl } from "../providers/flibustaProvider.js";
 
 export function registerActions(bot, db) {
   bot.action("acc:req", async (ctx) => {
@@ -100,6 +103,56 @@ export function registerActions(bot, db) {
     } catch (e) {
       console.error(e);
       await ctx.reply(`❌ ${kindleErrorHint(e)}`, { message_thread_id: ctx.message?.message_thread_id });
+    }
+  });
+
+  bot.action(/^flib:pick:([a-f0-9]+):(\d+|none)$/, async (ctx) => {
+    try {
+      const actorId = getUserId(ctx);
+      const token = ctx.match?.[1];
+      const choice = ctx.match?.[2];
+      const payload = getCandidatePickPayload(token);
+
+      if (!payload) {
+        await ctx.answerCbQuery("Список устарел", { show_alert: true });
+        return;
+      }
+
+      if (!actorId || payload.userId !== actorId) {
+        await ctx.answerCbQuery("Это не для вас", { show_alert: true });
+        return;
+      }
+
+      clearCandidatePick(token);
+      await ctx.answerCbQuery();
+
+      if (choice === "none") {
+        await payload.onNone(ctx);
+        return;
+      }
+
+      const picked = payload.candidates[Number(choice)];
+      if (!picked) {
+        await ctx.reply("Некорректный выбор.", { message_thread_id: ctx.message?.message_thread_id });
+        return;
+      }
+
+      const flibustaResult = await fetchFlibustaResultForCandidate(picked);
+      const kindleButton = buildKindleButton(db, actorId, flibustaResult.book);
+
+      await replyWithFlibustaResult({
+        ctx,
+        flibustaResult,
+        bestItem: payload.bestItem,
+        toAbsoluteUrl,
+        getUrl,
+        cache: payload.cache,
+        cacheKey: payload.cacheKey,
+        extraButtons: kindleButton ? [kindleButton] : [],
+      });
+    } catch (e) {
+      console.error(e);
+      await ctx.answerCbQuery("Ошибка").catch(() => {});
     }
   });
 }

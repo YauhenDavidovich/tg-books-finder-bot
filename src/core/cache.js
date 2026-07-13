@@ -21,6 +21,9 @@ export function createBoundedCache(maxSize = 500) {
         map.delete(oldestKey);
       }
     },
+    delete(key) {
+      map.delete(key);
+    },
     get size() {
       return map.size;
     },
