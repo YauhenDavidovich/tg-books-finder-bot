@@ -20,7 +20,8 @@ export function registerTextHandler(bot, db, cache) {
       const isPendingFind = userId ? pendingFind.get(userId) : false;
       const isPendingKindle = userId ? pendingKindle.get(userId) : false;
 
-      if (isPendingKindle) {
+      // Pending state is in-memory and lost on restart, so also accept a bare Kindle email.
+      if (isPendingKindle || (userId && isValidKindleEmail(text))) {
         if (userId) pendingKindle.delete(userId);
         const email = text.trim().toLowerCase();
         if (!isValidKindleEmail(email)) {
