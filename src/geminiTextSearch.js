@@ -1,4 +1,4 @@
-import { parseJsonLoose } from "./gemini/jsonExtract.js";
+import { parseJsonLoose } from "./llm/jsonExtract.js";
 import { fetchWithTimeout } from "./core/fetchWithTimeout.js";
 
 function readAllParts(parts) {

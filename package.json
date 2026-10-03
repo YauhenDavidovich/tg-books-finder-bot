@@ -16,7 +16,9 @@
     "dotenv": "^17.2.3",
     "flibusta-api": "^0.2.3",
     "nodemailer": "^6.9.15",
+    "openai": "^6.49.0",
     "resend": "^2.0.0",
-    "telegraf": "^4.16.3"
+    "telegraf": "^4.16.3",
+    "zod": "^4.6.5"
   }
 }

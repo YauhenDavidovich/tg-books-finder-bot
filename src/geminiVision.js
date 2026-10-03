@@ -1,4 +1,4 @@
-import { stripCodeFences, extractJsonObject, tryRepairTruncatedJson } from "./gemini/jsonExtract.js";
+import { stripCodeFences, extractJsonObject, tryRepairTruncatedJson } from "./llm/jsonExtract.js";
 import { fetchWithTimeout } from "./core/fetchWithTimeout.js";
 
 function readAllParts(parts) {
