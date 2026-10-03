@@ -42,7 +42,11 @@ function isRouterDown(err) {
 function describeRouterError(err) {
   if (err instanceof OpenAI.APIConnectionTimeoutError) return "router timeout";
   if (isConnectionError(err)) return `router unreachable (${err.cause?.code || err.message})`;
-  if (err?.status) return `router ${err.status}: ${String(err.message || "").slice(0, 200)}`;
+  if (err?.status) {
+    // The SDK's message already starts with the status ("503 all keys exhausted").
+    const detail = String(err.message || "").replace(new RegExp(`^${err.status}\\s*`), "").slice(0, 200);
+    return `router ${err.status}${detail ? `: ${detail}` : ""}`;
+  }
   return String(err?.message || err);
 }
 

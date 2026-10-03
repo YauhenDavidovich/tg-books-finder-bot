@@ -108,7 +108,7 @@ test("429/500/502/503/504 fall back to direct", async (t) => {
     const { llm } = makeLlm(router.baseURL);
     const r = await llm.chat("q");
     assert.equal(r.via, "direct", `status ${status}`);
-    assert.match(r.fallbackReason, new RegExp(`router ${status}`));
+    assert.equal(r.fallbackReason, `router ${status}: upstream failed`);
   }
 });
 
