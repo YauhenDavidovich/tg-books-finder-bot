@@ -6,7 +6,8 @@ import { buildFlibustaAttemptsFromQuery } from "./flibustaAttempts.js";
 import { replyChunked } from "./telegramUtils.js";
 import { isDebugAllowed, getUserId } from "../access/accessControl.js";
 import { searchBooks, searchByAuthor, getBookInfo } from "../providers/flibustaProvider.js";
-import { geminiDebugBookQueryFromText, parseBookQueryResult } from "../geminiTextSearch.js";
+import { extractBookQueryFromText } from "../llm/bookExtraction.js";
+import { formatLlmSteps } from "../llm/debug.js";
 import { findBooksByQuery } from "../googleBooks.js";
 import { createBoundedCache } from "./cache.js";
 
@@ -170,27 +171,16 @@ export async function fetchFlibustaResultForCandidate(candidate) {
 }
 
 export async function handleFindQuery({ ctx, input, db, cache }) {
-  // Fetch Gemini exactly once and reuse it for both the debug preview and
-  // the actual parsed query - two independent calls aren't guaranteed to
-  // agree (Gemini 2.5 Flash's "thinking" adds variance even at temperature
-  // 0), which previously let the debug preview show one answer while a
-  // second, separate call silently returned a different one for the search.
-  const raw = await geminiDebugBookQueryFromText(input);
+  // One LLM call, reused for both the debug preview and the search - two
+  // independent calls aren't guaranteed to agree (model "thinking" adds
+  // variance even at temperature 0), which previously let the debug preview
+  // show one answer while the search silently used a different one.
+  const { query: q, llm } = await extractBookQueryFromText(input);
 
   if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
-    const bodyPreview = String(raw?.rawBody || "").slice(0, 2000);
-    const candPreview = String(raw?.candidateText || "").slice(0, 2000);
-    const infoText =
-      `GEMINI DEBUG\n` +
-      `finishReason: ${raw?.finishReason || "-"}\n` +
-      `status: ${raw?.status ?? "-"}\n\n` +
-      `candidateText:\n${candPreview || "(empty)"}\n\n` +
-      `rawBody preview:\n${bodyPreview || "(empty)"}`;
-
-    await replyChunked(ctx, infoText);
+    await replyChunked(ctx, formatLlmSteps(llm, { withText: true }));
   }
 
-  const q = parseBookQueryResult(raw);
   const conf = Number(q?.confidence ?? 0) || 0;
 
   if (!q?.query) {
@@ -200,7 +190,7 @@ export async function handleFindQuery({ ctx, input, db, cache }) {
     return;
   }
 
-  if (conf < 0.25) {
+  if (conf < config.TEXT_LOW_CONFIDENCE) {
     await ctx.reply(`Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`, {
       message_thread_id: ctx.message?.message_thread_id,
     });

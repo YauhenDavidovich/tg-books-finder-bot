@@ -4,7 +4,7 @@ import { config } from "../config.js";
 import { isAllowedTopic, downloadTelegramFile, replyChunked } from "../core/telegramUtils.js";
 import { ensureAllowedOrRequest, isDebugAllowed } from "../access/accessControl.js";
 import { enforceDailyLimit } from "./dailyLimit.js";
-import { geminiExtractBookFromImageBuffer } from "../geminiVision.js";
+import { extractBookFromImage } from "../llm/bookExtraction.js";
 import { pickFlibustaCandidates, presentFlibustaCandidates } from "../core/findFlow.js";
 import { buildFlibustaAttemptsFromVisionItem } from "../core/flibustaAttempts.js";
 import { findBookByTitleAuthor } from "../googleBooks.js";
@@ -64,8 +64,8 @@ export function registerPhotoHandler(bot, db, cache) {
         return;
       }
 
-      // 1) Gemini Vision: image -> JSON
-      const extracted = await geminiExtractBookFromImageBuffer(buffer, "image/jpeg");
+      // 1) LLM vision: image -> JSON (FreeLLMAPI, or direct Gemini as fallback)
+      const extracted = await extractBookFromImage(buffer, "image/jpeg");
 
       if (config.RAW_MODE && isDebugAllowed(ctx)) {
         const rawText =
@@ -76,7 +76,7 @@ export function registerPhotoHandler(bot, db, cache) {
       const items = Array.isArray(extracted?.items) ? extracted.items : [];
       const bestItem = items.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0];
 
-      if (!bestItem || !bestItem.title || (bestItem.confidence ?? 0) < 0.65) {
+      if (!bestItem || !bestItem.title || (bestItem.confidence ?? 0) < config.PHOTO_MIN_CONFIDENCE) {
         await ctx.reply("Не уверен в названии. Пришли кадр, где обложка крупнее и ровнее.", {
           message_thread_id: ctx.message.message_thread_id,
         });

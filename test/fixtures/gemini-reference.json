@@ -1,0 +1,341 @@
+{
+  "_note": "Captured from the pre-FreeLLMAPI geminiTextSearch.js/geminiVision.js (commit e22603b) with mocked Gemini responses.",
+  "text": {
+    "input": "антиутопия про стеклянный город и нумера, автор вроде Замятин",
+    "response": {
+      "query": "антиутопия стеклянный город нумера",
+      "title": "Мы",
+      "author": "Евгений Замятин",
+      "title_ru": "Мы",
+      "author_ru": "Евгений Замятин",
+      "confidence": 0.93
+    },
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "You extract book search data from a user's description.\n\nField rules:\n- query: 2–6 words, must be useful for searching a book, include key nouns, no filler words like book/story/novel.\n- title: exact title ONLY if you are very sure, otherwise null. Use whatever language you are most confident is the exact title (do not translate unnecessarily).\n- author: exact author ONLY if you are very sure, otherwise null.\n- title_ru: the Russian title of the same work, if you know one (translated or original). If title is already Russian, repeat it here. Otherwise null.\n- author_ru: the author's name in Russian/Cyrillic spelling, if you know it (e.g. \"Стивен Кинг\" for \"Stephen King\"). Otherwise null.\n- confidence: 0.9–1.0 famous clearly identified, 0.6–0.8 strong guess, 0.3–0.5 weak guess, 0.0–0.2 almost no idea.\n\nImportant behavior:\n- NEVER invent a fake title or author.\n- If unsure, still produce the best possible query.\n\nUser description:\n```text\nантиутопия про стеклянный город и нумера, автор вроде Замятин\n```"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "temperature": 0,
+        "maxOutputTokens": 1024,
+        "responseMimeType": "application/json",
+        "responseSchema": {
+          "type": "OBJECT",
+          "properties": {
+            "query": {
+              "type": "STRING"
+            },
+            "title": {
+              "type": "STRING",
+              "nullable": true
+            },
+            "author": {
+              "type": "STRING",
+              "nullable": true
+            },
+            "title_ru": {
+              "type": "STRING",
+              "nullable": true
+            },
+            "author_ru": {
+              "type": "STRING",
+              "nullable": true
+            },
+            "confidence": {
+              "type": "NUMBER"
+            }
+          },
+          "required": [
+            "query",
+            "title",
+            "author",
+            "title_ru",
+            "author_ru",
+            "confidence"
+          ]
+        }
+      }
+    },
+    "parsed": {
+      "query": "антиутопия стеклянный город нумера",
+      "title": "Мы",
+      "author": "Евгений Замятин",
+      "title_ru": "Мы",
+      "author_ru": "Евгений Замятин",
+      "confidence": 0.93
+    }
+  },
+  "cover": {
+    "imageBase64": "ZmFrZS1qcGVnLWJ5dGVz",
+    "mimeType": "image/jpeg",
+    "responses": [
+      {
+        "items": [
+          {
+            "title": "We",
+            "author": "Yevgeny Zamyatin",
+            "isbn": null,
+            "confidence": 0.92,
+            "evidence": [
+              "WE",
+              "YEVGENY ZAMYATIN"
+            ]
+          },
+          {
+            "title": "Penguin Classics",
+            "author": null,
+            "isbn": null,
+            "confidence": 0.3,
+            "evidence": [
+              "PENGUIN"
+            ]
+          }
+        ]
+      },
+      {
+        "title_en": "We",
+        "author_en": "Yevgeny Zamyatin",
+        "title_ru": "Мы",
+        "author_ru": "Евгений Замятин",
+        "variants": [
+          "Мы Замятин",
+          "We Zamyatin",
+          "Мы"
+        ]
+      }
+    ],
+    "requests": [
+      {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extract book title/author from the image.\nRules:\n- Do not invent. If unsure, return an empty items array.\n- evidence must be exact text seen on the image.\n- Ignore UI elements and stickers.\n"
+              },
+              {
+                "inlineData": {
+                  "mimeType": "image/jpeg",
+                  "data": "ZmFrZS1qcGVnLWJ5dGVz"
+                }
+              }
+            ]
+          }
+        ],
+        "generationConfig": {
+          "temperature": 0,
+          "maxOutputTokens": 320,
+          "responseMimeType": "application/json",
+          "responseSchema": {
+            "type": "OBJECT",
+            "properties": {
+              "items": {
+                "type": "ARRAY",
+                "items": {
+                  "type": "OBJECT",
+                  "properties": {
+                    "title": {
+                      "type": "STRING"
+                    },
+                    "author": {
+                      "type": "STRING",
+                      "nullable": true
+                    },
+                    "isbn": {
+                      "type": "STRING",
+                      "nullable": true
+                    },
+                    "confidence": {
+                      "type": "NUMBER"
+                    },
+                    "evidence": {
+                      "type": "ARRAY",
+                      "items": {
+                        "type": "STRING"
+                      }
+                    }
+                  },
+                  "required": [
+                    "title",
+                    "author",
+                    "isbn",
+                    "confidence",
+                    "evidence"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "items"
+            ]
+          }
+        }
+      },
+      {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Enrich extracted book info.\nRules:\n- Do not invent if unknown.\n- If the cover is EN, try to provide well-known RU translation.\n- variants: 6-10 short strings for Flibusta, each <= 80 chars, mix EN/RU.\nBase:\n{\"title\":\"We\",\"author\":\"Yevgeny Zamyatin\",\"isbn\":null}\nEvidence:\nWE | YEVGENY ZAMYATIN"
+              },
+              {
+                "inlineData": {
+                  "mimeType": "image/jpeg",
+                  "data": "ZmFrZS1qcGVnLWJ5dGVz"
+                }
+              }
+            ]
+          }
+        ],
+        "generationConfig": {
+          "temperature": 0,
+          "maxOutputTokens": 260,
+          "responseMimeType": "application/json",
+          "responseSchema": {
+            "type": "OBJECT",
+            "properties": {
+              "title_en": {
+                "type": "STRING",
+                "nullable": true
+              },
+              "author_en": {
+                "type": "STRING",
+                "nullable": true
+              },
+              "title_ru": {
+                "type": "STRING",
+                "nullable": true
+              },
+              "author_ru": {
+                "type": "STRING",
+                "nullable": true
+              },
+              "variants": {
+                "type": "ARRAY",
+                "items": {
+                  "type": "STRING"
+                }
+              }
+            },
+            "required": [
+              "title_en",
+              "author_en",
+              "title_ru",
+              "author_ru",
+              "variants"
+            ]
+          }
+        }
+      }
+    ],
+    "result": {
+      "items": [
+        {
+          "title": "We",
+          "author": "Yevgeny Zamyatin",
+          "isbn": null,
+          "confidence": 0.92,
+          "evidence": [
+            "WE",
+            "YEVGENY ZAMYATIN"
+          ],
+          "title_en": "We",
+          "author_en": "Yevgeny Zamyatin",
+          "title_ru": "Мы",
+          "author_ru": "Евгений Замятин",
+          "variants": [
+            "Мы Замятин",
+            "We Zamyatin",
+            "Мы",
+            "We Yevgeny Zamyatin",
+            "We",
+            "Мы Евгений Замятин"
+          ]
+        }
+      ]
+    }
+  },
+  "coverEmpty": {
+    "response": {
+      "items": []
+    },
+    "requests": [
+      {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extract book title/author from the image.\nRules:\n- Do not invent. If unsure, return an empty items array.\n- evidence must be exact text seen on the image.\n- Ignore UI elements and stickers.\n"
+              },
+              {
+                "inlineData": {
+                  "mimeType": "image/jpeg",
+                  "data": "ZmFrZS1qcGVnLWJ5dGVz"
+                }
+              }
+            ]
+          }
+        ],
+        "generationConfig": {
+          "temperature": 0,
+          "maxOutputTokens": 320,
+          "responseMimeType": "application/json",
+          "responseSchema": {
+            "type": "OBJECT",
+            "properties": {
+              "items": {
+                "type": "ARRAY",
+                "items": {
+                  "type": "OBJECT",
+                  "properties": {
+                    "title": {
+                      "type": "STRING"
+                    },
+                    "author": {
+                      "type": "STRING",
+                      "nullable": true
+                    },
+                    "isbn": {
+                      "type": "STRING",
+                      "nullable": true
+                    },
+                    "confidence": {
+                      "type": "NUMBER"
+                    },
+                    "evidence": {
+                      "type": "ARRAY",
+                      "items": {
+                        "type": "STRING"
+                      }
+                    }
+                  },
+                  "required": [
+                    "title",
+                    "author",
+                    "isbn",
+                    "confidence",
+                    "evidence"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "items"
+            ]
+          }
+        }
+      }
+    ],
+    "result": {
+      "items": []
+    }
+  }
+}

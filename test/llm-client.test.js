@@ -1,43 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
 import { z } from "zod";
 import { createLlm, JSON_RULE, LlmJsonError } from "../src/llm/client.js";
-
-// A local stand-in for FreeLLMAPI: records every request body and answers
-// with whatever the test's handler returns.
-async function startRouter(handler) {
-  const requests = [];
-  const server = http.createServer(async (req, res) => {
-    let raw = "";
-    for await (const chunk of req) raw += chunk;
-    const body = JSON.parse(raw || "{}");
-    requests.push(body);
-    const { status = 200, json = {}, headers = {} } = await handler(body, requests.length);
-    res.writeHead(status, { "content-type": "application/json", ...headers });
-    res.end(JSON.stringify(json));
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
-  return {
-    baseURL: `http://127.0.0.1:${port}/v1`,
-    requests,
-    close: () => new Promise((resolve) => server.close(resolve)),
-  };
-}
-
-const completion = (content, routedVia = "google/gemini-3.5-flash") => ({
-  headers: { "x-routed-via": routedVia },
-  json: {
-    id: "x",
-    object: "chat.completion",
-    created: 0,
-    model: "auto",
-    choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
-  },
-});
-
-const failure = (status, message = "upstream failed") => ({ status, json: { error: { message } } });
+import { startRouter, completion, failure } from "./helpers/fakeRouter.js";
 
 function makeDirect(answer = '{"title":"from-gemini"}') {
   const calls = [];
