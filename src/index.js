@@ -8,6 +8,10 @@ import { registerCommands } from "./bot/commands.js";
 import { registerActions } from "./bot/actions.js";
 import { registerTextHandler } from "./bot/textHandler.js";
 import { registerPhotoHandler } from "./bot/photoHandler.js";
+import { setDirectFallback } from "./llm/client.js";
+import { geminiText, geminiVision } from "./llm/gemini-direct.js";
+
+setDirectFallback({ text: geminiText, vision: geminiVision });
 
 const bot = new Telegraf(config.BOT_TOKEN);
 const db = openDb(config);
