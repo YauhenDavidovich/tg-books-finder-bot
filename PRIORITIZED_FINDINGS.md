@@ -140,6 +140,9 @@ When two candidates tie on score, whichever appears first in `uniq` (itself depe
 ### P2-7. `nodemailer` + `resend` overlap
 Both are genuinely used — `sendToKindle` (`index.js:400-463`) picks Resend if `RESEND_API_KEY` is set, otherwise falls back to SMTP via `nodemailer` — so this isn't dead-code duplication, but it is real complexity (two email code paths, two sets of env vars, two error-message branches in the catch block at `index.js:770-784`) for what is presumably a single deployment's fixed choice. Worth a decision: pick one path for production and keep the other only if multi-provider support is an actual requirement.
 
+### P2-8. Text search has no cache in front of the LLM call — TODO
+The photo flow checks the SHA-256 image cache before any LLM call, but text search always calls the LLM first: its cache key (`find:<normalized title/author/query>` in `core/findFlow.js`) is derived from the LLM's answer and is never read back. Repeating the same description costs another LLM request (FreeLLMAPI quota or Gemini). TODO: look up a key derived from the normalized user input before `extractBookQueryFromText`. Deliberately left out of the FreeLLMAPI migration (2026-10-03).
+
 ---
 
 ## Security check (as requested)
