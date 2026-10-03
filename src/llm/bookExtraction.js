@@ -303,7 +303,9 @@ export async function extractBookFromImage(imageBuffer, mimeType = "image/jpeg",
     steps.push(llmStep("enrich", r2));
     enrich = r2.data;
   } catch (err) {
-    steps.push({ step: "enrich", error: String(err?.message || err).split("\n")[0], attempts: err?.attempts || [] });
+    const error = String(err?.message || err).split("\n")[0];
+    console.warn(`[llm] enrich failed, using the cover read without RU/EN variants: ${error}`);
+    steps.push({ step: "enrich", error, attempts: err?.attempts || [] });
     enrich = {};
   }
 

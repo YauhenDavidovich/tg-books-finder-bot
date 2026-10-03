@@ -5,6 +5,7 @@ import { isAllowedTopic, downloadTelegramFile, replyChunked } from "../core/tele
 import { ensureAllowedOrRequest, isDebugAllowed } from "../access/accessControl.js";
 import { enforceDailyLimit } from "./dailyLimit.js";
 import { extractBookFromImage } from "../llm/bookExtraction.js";
+import { formatLlmSteps } from "../llm/debug.js";
 import { pickFlibustaCandidates, presentFlibustaCandidates } from "../core/findFlow.js";
 import { buildFlibustaAttemptsFromVisionItem } from "../core/flibustaAttempts.js";
 import { findBookByTitleAuthor } from "../googleBooks.js";
@@ -67,9 +68,14 @@ export function registerPhotoHandler(bot, db, cache) {
       // 1) LLM vision: image -> JSON (FreeLLMAPI, or direct Gemini as fallback)
       const extracted = await extractBookFromImage(buffer, "image/jpeg");
 
+      if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
+        await replyChunked(ctx, formatLlmSteps(extracted.llm));
+      }
+
       if (config.RAW_MODE && isDebugAllowed(ctx)) {
         const rawText =
-          `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` + JSON.stringify(extracted, null, 2);
+          `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` +
+          JSON.stringify({ items: extracted.items, llm: extracted.llm.map(({ text, ...meta }) => meta) }, null, 2);
         await replyChunked(ctx, rawText);
       }
 
