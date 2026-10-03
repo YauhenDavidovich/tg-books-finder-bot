@@ -5,7 +5,8 @@ import { isAllowedTopic, downloadTelegramFile, replyChunked } from "../core/tele
 import { ensureAllowedOrRequest, isDebugAllowed } from "../access/accessControl.js";
 import { enforceDailyLimit } from "./dailyLimit.js";
 import { geminiExtractBookFromImageBuffer } from "../geminiVision.js";
-import { buildFlibustaAttemptsFromVisionItem, pickFlibustaCandidates, presentFlibustaCandidates } from "../core/findFlow.js";
+import { pickFlibustaCandidates, presentFlibustaCandidates } from "../core/findFlow.js";
+import { buildFlibustaAttemptsFromVisionItem } from "../core/flibustaAttempts.js";
 import { findBookByTitleAuthor } from "../googleBooks.js";
 
 function sha256(buf) {
