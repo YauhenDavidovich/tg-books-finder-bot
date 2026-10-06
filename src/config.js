@@ -33,7 +33,9 @@ export const config = {
   LLM_API_KEY: process.env.LLM_API_KEY || "",
   LLM_MODEL: process.env.LLM_MODEL || "auto",
   LLM_VISION_MODEL: process.env.LLM_VISION_MODEL || "auto",
-  LLM_TIMEOUT_MS: Number(process.env.LLM_TIMEOUT_MS || 30000),
+  // Separate budgets: vision on Gemini 3.5 Flash has taken up to ~16s.
+  LLM_TIMEOUT_MS: Number(process.env.LLM_TIMEOUT_MS || 12000),
+  LLM_VISION_TIMEOUT_MS: Number(process.env.LLM_VISION_TIMEOUT_MS || 25000),
   // json_schema lets the router enforce the shape natively on Gemini models
   // (and downgrade it per provider); json_object is the fallback knob if
   // json_schema turns out to trip up the free models in the chain.

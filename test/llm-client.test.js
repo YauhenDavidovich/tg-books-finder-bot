@@ -301,6 +301,35 @@ test("startup check: a path without /v1 only warns, the router is still used", a
   assert.ok(logger.lines.some((l) => l.includes('LLM_BASE_URL path is "/" - FreeLLMAPI serves its API under /v1')));
 });
 
+test("routerSchema applies to router answers only", async (t) => {
+  const router = await startRouter(() => completion('{"title":""}'));
+  t.after(router.close);
+  const { llm, direct } = makeLlm(router.baseURL, { directAnswer: '{"title":""}' });
+  const strict = TitleSchema.refine((d) => d.title, { message: "empty title" });
+
+  const r = await llm.chatJson("q", { schema: TitleSchema, routerSchema: strict });
+  assert.equal(r.via, "direct");
+  assert.deepEqual(r.data, { title: "" }, "Gemini's answer is validated with the plain schema");
+  assert.equal(direct.calls.length, 1);
+  assert.deepEqual(r.attempts.map((a) => a.error), ["(root): empty title", "(root): empty title", null]);
+});
+
+test("separate timeouts: a slow router times out text but not vision", async (t) => {
+  const router = await startRouter(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return completion('{"title":"Мы"}');
+  });
+  t.after(router.close);
+  const { llm } = makeLlm(router.baseURL, { timeoutMs: 100, visionTimeoutMs: 2000 });
+
+  const text = await llm.chat("q");
+  assert.equal(text.via, "direct");
+  assert.equal(text.fallbackReason, "router timeout");
+
+  const vision = await llm.vision("QUJD", "image/jpeg", "read");
+  assert.equal(vision.via, "freellmapi");
+});
+
 test("config errors fail fast", () => {
   assert.throws(() => createLlm({ provider: "openai" }), /Unknown LLM_PROVIDER/);
   assert.throws(() => createLlm({ provider: "freellmapi" }), /needs a working router config: LLM_BASE_URL\/LLM_API_KEY not set/);

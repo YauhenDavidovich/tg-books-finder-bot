@@ -109,11 +109,21 @@ export const BookQuerySchema = z.object({
   confidence,
 });
 
+// Router answers must also identify something, not just have the right
+// shape: an answer naming the author but no title (seen from nemotron on
+// "boy wizard with a scar", with a non-empty query) gets the JSON retry and
+// then Gemini. Gemini's own answers keep the plain schema - an empty query
+// there still means "Мало деталей", as before.
+export const BookQueryRouterSchema = BookQuerySchema.refine((q) => q.title || q.title_ru || q.query, {
+  message: "neither a title nor a query",
+}).refine((q) => q.title || q.title_ru || !(q.author || q.author_ru), { message: "author without a title" });
+
 /** → { query: { query, title, author, title_ru, author_ru, confidence }, llm: [step] } */
 export async function extractBookQueryFromText(userText, { llm = getDefaultLlm() } = {}) {
   const r = await llm.chatJson(buildTextPrompt(userText), {
     system: TEXT_SYSTEM,
     schema: BookQuerySchema,
+    routerSchema: BookQueryRouterSchema,
     jsonSchema: toJsonSchema(TEXT_GEMINI_SCHEMA),
     schemaName: "book_query",
     maxTokens: 2048,
@@ -182,6 +192,12 @@ export const CoverExtractSchema = z.preprocess((v) => {
   return v;
 }, z.object({ items: z.array(CoverItemSchema) }));
 
+// Router-only, as for T1: an item without a title is a failed read, not a
+// "can't read it" answer (that one is an empty items array).
+export const CoverExtractRouterSchema = CoverExtractSchema.refine((d) => d.items.every((it) => it.title), {
+  message: "item without a title",
+});
+
 // ---------- V2: enrich (EN/RU/variants) ----------
 
 const ENRICH_GEMINI_SCHEMA = {
@@ -217,13 +233,17 @@ const ENRICH_SYSTEM = [
   "- variants: short search strings mixing the original, EN and RU forms of the title, with and without the author.",
 ].join("\n");
 
-export const EnrichSchema = z.object({
-  title_en: nullableText,
-  author_en: nullableText,
-  title_ru: nullableText,
-  author_ru: nullableText,
-  variants: stringList,
-});
+export const EnrichSchema = z.preprocess(
+  // Gemini has answered with [{...}] despite the OBJECT responseSchema.
+  (v) => (Array.isArray(v) && v.length === 1 && v[0] && typeof v[0] === "object" ? v[0] : v),
+  z.object({
+    title_en: nullableText,
+    author_en: nullableText,
+    title_ru: nullableText,
+    author_ru: nullableText,
+    variants: stringList,
+  })
+);
 
 function uniqStrings(arr) {
   return [...new Set((arr || []).map((s) => String(s || "").trim()).filter(Boolean))];
@@ -240,6 +260,7 @@ export async function extractBookFromImage(imageBuffer, mimeType = "image/jpeg",
   const r1 = await llm.visionJson(b64, mimeType, COVER_PROMPT, {
     system: COVER_SYSTEM,
     schema: CoverExtractSchema,
+    routerSchema: CoverExtractRouterSchema,
     jsonSchema: toJsonSchema(COVER_GEMINI_SCHEMA),
     schemaName: "cover_extract",
     maxTokens: 1024,

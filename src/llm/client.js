@@ -97,6 +97,9 @@ function describeJsonError(err) {
  * - maxTokens, temperature (по умолчанию 0), reasoningEffort: параметры роутера
  * - jsonSchema, schemaName: JSON Schema для response_format (только *Json)
  * - schema: zod-схема, которой валидируется `data` (только *Json)
+ * - routerSchema: более строгая схема для ответов роутера (по умолчанию
+ *   schema): «форма верная, но по сути пусто» уходит в ретрай и на Gemini,
+ *   а ответы самого Gemini принимаются как раньше
  * - geminiSchema, geminiMaxTokens: параметры прямого Gemini (см. gemini-direct.js)
  * - directImage { base64, mimeType }: текстовый вызов на роутере, но Gemini
  *   получает ещё и картинку (V2 enrich: роутеру картинка не нужна, а
@@ -108,7 +111,8 @@ export function createLlm({
   apiKey,
   model = "auto",
   visionModel = "auto",
-  timeoutMs = 30_000,
+  timeoutMs = 12_000,
+  visionTimeoutMs = 25_000,
   jsonMode = "json_schema",
   debug = false,
   logger = console,
@@ -200,7 +204,9 @@ export function createLlm({
     };
 
     const t0 = now();
-    const { data, response } = await router.chat.completions.create(body).withResponse();
+    const { data, response } = await router.chat.completions
+      .create(body, { timeout: kind === "vision" ? visionTimeoutMs : timeoutMs })
+      .withResponse();
     if (!Array.isArray(data?.choices)) {
       throw new RouterResponseError(
         `router returned a non-API response (${response.headers.get("content-type") || "no content-type"}) - check that LLM_BASE_URL ends with /v1`
@@ -279,7 +285,8 @@ export function createLlm({
       attempts.push(attempt);
       try {
         const json = parseJsonLoose(r.text);
-        const data = opts.schema ? opts.schema.parse(json) : json;
+        const schema = (r.via === "freellmapi" && opts.routerSchema) || opts.schema;
+        const data = schema ? schema.parse(json) : json;
         return { ...r, data, attempts };
       } catch (err) {
         attempt.error = describeJsonError(err);
@@ -342,6 +349,7 @@ export function getDefaultLlm() {
     model: config.LLM_MODEL,
     visionModel: config.LLM_VISION_MODEL,
     timeoutMs: config.LLM_TIMEOUT_MS,
+    visionTimeoutMs: config.LLM_VISION_TIMEOUT_MS,
     jsonMode: config.LLM_JSON_MODE,
     debug: config.LLM_DEBUG,
   });

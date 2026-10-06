@@ -38,17 +38,17 @@ function directLlm(geminiAnswers) {
   return { llm, requests };
 }
 
-function routerLlm(router) {
+function routerLlm(router, directAnswer = "{}") {
   const calls = [];
   const llm = createLlm({ baseURL: router.baseURL, apiKey: "k", visionModel: "auto:vision", logger: silentLogger });
   llm.setDirectFallback({
     text: async (prompt, opts) => {
       calls.push({ kind: "text", prompt, opts });
-      return "{}";
+      return directAnswer;
     },
     vision: async (b64, mimeType, prompt, opts) => {
       calls.push({ kind: "vision", b64, prompt, opts });
-      return "{}";
+      return directAnswer;
     },
   });
   return { llm, direct: { calls } };
@@ -158,6 +158,68 @@ test("V2 failure is swallowed: base item returned, error recorded for debug", as
   assert.match(result.llm[1].error, /400/);
 });
 
+// ---------- router answers that are valid JSON but don't identify anything ----------
+
+// Comparison run 2026-10-06, row 3: openrouter/nvidia/nemotron-3-super-120b
+// named the author but no title - with a non-empty query, so a plain
+// "title or query" check would have let it through.
+const ROW3_ROUTER_ANSWER =
+  '{"query": "boy wizard scar magic school", "title": null, "author": "J.K. Rowling", "title_ru": null, "author_ru": "Джоан Роулинг", "confidence": 0.7}';
+
+test("T1 router: author without a title -> JSON retry -> Gemini (comparison row 3)", async (t) => {
+  const router = await startRouter(() => completion(ROW3_ROUTER_ANSWER, "openrouter/nvidia/nemotron-3-super-120b-a12b:free"));
+  t.after(router.close);
+  const gemini = { query: "boy wizard scar magic school", title: "Harry Potter", author: "J.K. Rowling", title_ru: "Гарри Поттер", author_ru: "Джоан Роулинг", confidence: 1 };
+  const { llm, direct } = routerLlm(router, JSON.stringify(gemini));
+
+  const { query, llm: steps } = await extractBookQueryFromText("book about a boy wizard with a scar who goes to a magic school", { llm });
+
+  assert.equal(query.title, "Harry Potter");
+  assert.equal(query.title_ru, "Гарри Поттер");
+  assert.equal(router.requests.length, 2, "first answer + JSON-only retry");
+  assert.equal(direct.calls.length, 1);
+  assert.deepEqual(
+    steps[0].attempts.map((a) => [a.via, a.error]),
+    [
+      ["freellmapi", "(root): author without a title"],
+      ["freellmapi", "(root): author without a title"],
+      ["direct", null],
+    ]
+  );
+});
+
+test("T1 router: neither title nor query -> Gemini; Gemini's own empty answer still means 'Мало деталей'", async (t) => {
+  const empty = { query: "", title: null, author: null, title_ru: null, author_ru: null, confidence: 0 };
+  const router = await startRouter(() => completion(JSON.stringify(empty)));
+  t.after(router.close);
+  const { llm, direct } = routerLlm(router, JSON.stringify(empty));
+
+  const { query, llm: steps } = await extractBookQueryFromText("asdf", { llm });
+  assert.equal(direct.calls.length, 1, "router answer rejected");
+  assert.equal(query.query, "", "Gemini's answer accepted as before -> handleFindQuery replies 'Мало деталей'");
+  assert.match(steps[0].attempts[0].error, /neither a title nor a query/);
+
+  const { llm: directOnly } = directLlm([empty]);
+  const { query: q2 } = await extractBookQueryFromText("asdf", { llm: directOnly });
+  assert.equal(q2.query, "");
+});
+
+test("V1 router: item without a title -> Gemini; on the Gemini path it's accepted as before", async (t) => {
+  const noTitle = { items: [{ title: "", author: "Джоан Роулинг", isbn: null, confidence: 0.9, evidence: [] }] };
+  const router = await startRouter(() => completion(JSON.stringify(noTitle)));
+  t.after(router.close);
+  const { llm, direct } = routerLlm(router, JSON.stringify(ref.cover.responses[0]));
+
+  const result = await extractBookFromImage(imageBuffer(), ref.cover.mimeType, { llm });
+  assert.equal(direct.calls[0].kind, "vision");
+  assert.equal(result.items[0].title, "We");
+  assert.match(result.llm[0].attempts[0].error, /item without a title/);
+
+  const { llm: directOnly } = directLlm([noTitle, {}]);
+  const direct2 = await extractBookFromImage(imageBuffer(), ref.cover.mimeType, { llm: directOnly });
+  assert.equal(direct2.items[0].title, "", "photoHandler then replies 'Не уверен'");
+});
+
 // ---------- zod leniency ----------
 
 test("BookQuerySchema: missing/empty/'unknown' -> null, confidence normalized, query required", () => {
@@ -186,14 +248,12 @@ test("CoverExtractSchema: bare item/array accepted, truncation leftovers dropped
   assert.equal(CoverExtractSchema.safeParse({ book: "Мы" }).success, false);
 });
 
-test("EnrichSchema: everything optional", () => {
-  assert.deepEqual(EnrichSchema.parse({ title_ru: "Мы" }), {
-    title_en: null,
-    author_en: null,
-    title_ru: "Мы",
-    author_ru: null,
-    variants: [],
-  });
+test("EnrichSchema: everything optional; a one-element array is unwrapped", () => {
+  const expected = { title_en: null, author_en: null, title_ru: "Мы", author_ru: null, variants: [] };
+  assert.deepEqual(EnrichSchema.parse({ title_ru: "Мы" }), expected);
+  // Gemini answered [{...}] once despite the OBJECT responseSchema (comparison row 11).
+  assert.deepEqual(EnrichSchema.parse([{ title_ru: "Мы" }]), expected);
+  assert.equal(EnrichSchema.safeParse([{ title_ru: "Мы" }, { title_ru: "Мы" }]).success, false);
 });
 
 test("schema helpers derive JSON Schema and a prompt shape from a Gemini schema", () => {
