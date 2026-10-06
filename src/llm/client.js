@@ -21,7 +21,7 @@ const ROUTER_DOWN_STATUSES = new Set([401, 403, 404, 429, 500, 502, 503, 504]);
 const CONFIG_HINTS = {
   401: "check LLM_API_KEY",
   403: "check LLM_API_KEY",
-  404: "check LLM_BASE_URL (host, /v1) and LLM_MODEL/LLM_VISION_MODEL",
+  404: "check LLM_BASE_URL (host, /v1) and LLM_MODEL/LLM_LIGHT_MODEL/LLM_VISION_MODEL",
 };
 
 // --- Предохранитель: после 2 падений роутера подряд минуту ходим напрямую ---
@@ -101,6 +101,7 @@ function describeJsonError(err) {
  *   schema): «форма верная, но по сути пусто» уходит в ретрай и на Gemini,
  *   а ответы самого Gemini принимаются как раньше
  * - geminiSchema, geminiMaxTokens: параметры прямого Gemini (см. gemini-direct.js)
+ * - light: текстовый вызов идёт на lightModel (LLM_LIGHT_MODEL) вместо model
  * - directImage { base64, mimeType }: текстовый вызов на роутере, но Gemini
  *   получает ещё и картинку (V2 enrich: роутеру картинка не нужна, а
  *   Gemini-путь остаётся как был)
@@ -110,6 +111,7 @@ export function createLlm({
   baseURL,
   apiKey,
   model = "auto",
+  lightModel = model,
   visionModel = "auto",
   timeoutMs = 12_000,
   visionTimeoutMs = 25_000,
@@ -194,12 +196,17 @@ export function createLlm({
         ]
       : text;
 
+    const routerModel = kind === "vision" ? visionModel : opts.light ? lightModel : model;
+    // reasoning_effort здесь только выключает thinking у Gemini. Отдельный
+    // лёгкий профиль собран без Gemini, а Groq не принимает "minimal" ни у
+    // одной модели (400 по всей цепочке) - туда его не шлём.
+    const reasoningEffort = opts.light && lightModel !== model ? undefined : opts.reasoningEffort;
     const body = {
-      model: kind === "vision" ? visionModel : model,
+      model: routerModel,
       messages: [...(opts.system ? [{ role: "system", content: opts.system }] : []), { role: "user", content }],
       temperature: opts.temperature ?? 0,
       ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
-      ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...responseFormat(opts),
     };
 
@@ -347,6 +354,7 @@ export function getDefaultLlm() {
     baseURL: config.LLM_BASE_URL,
     apiKey: config.LLM_API_KEY,
     model: config.LLM_MODEL,
+    lightModel: config.LLM_LIGHT_MODEL,
     visionModel: config.LLM_VISION_MODEL,
     timeoutMs: config.LLM_TIMEOUT_MS,
     visionTimeoutMs: config.LLM_VISION_TIMEOUT_MS,

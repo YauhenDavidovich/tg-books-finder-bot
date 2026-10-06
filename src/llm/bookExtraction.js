@@ -310,6 +310,7 @@ export async function extractBookFromImage(imageBuffer, mimeType = "image/jpeg",
   // --- STEP 2: enrich (EN/RU/variants). Если упадёт, вернём baseResult.
   // On the router this is a text-only call fed with step 1's title/author:
   // a second vision call doubled the wait (~16s each on Gemini 3.5 Flash).
+  // It goes to LLM_LIGHT_MODEL, so it can be kept off the Gemini quota.
   // The direct Gemini path still sends the image, as before (directImage).
   let enrich = {};
   try {
@@ -320,6 +321,7 @@ export async function extractBookFromImage(imageBuffer, mimeType = "image/jpeg",
       schemaName: "cover_enrich",
       maxTokens: 1024,
       reasoningEffort,
+      light: true,
       geminiSchema: ENRICH_GEMINI_SCHEMA,
       geminiMaxTokens: 260,
       geminiThinkingBudget: 0,

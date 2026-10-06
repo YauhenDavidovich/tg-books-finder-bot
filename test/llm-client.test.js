@@ -89,6 +89,25 @@ test("vision sends the image as a data URL to the vision model", async (t) => {
   assert.deepEqual(parts[1], { type: "image_url", image_url: { url: "data:image/jpeg;base64,QUJD" } });
 });
 
+test("light calls go to lightModel (default: model); a separate light profile gets no reasoning_effort", async (t) => {
+  const router = await startRouter(() => completion('{"title":"Мы"}'));
+  t.after(router.close);
+  const opts = { light: true, reasoningEffort: "minimal" };
+
+  await makeLlm(router.baseURL).llm.chatJson("q", opts);
+  await makeLlm(router.baseURL, { lightModel: "auto:text-light" }).llm.chatJson("q", opts);
+  await makeLlm(router.baseURL, { lightModel: "auto:text-light" }).llm.chatJson("q", { reasoningEffort: "minimal" });
+
+  assert.deepEqual(
+    router.requests.map((b) => [b.model, b.reasoning_effort]),
+    [
+      ["auto", "minimal"],
+      ["auto:text-light", undefined],
+      ["auto", "minimal"],
+    ]
+  );
+});
+
 test("broken LLM_BASE_URL -> answered by direct Gemini, reason logged", async () => {
   const { llm, direct, logger } = makeLlm("http://127.0.0.1:9/v1");
 
