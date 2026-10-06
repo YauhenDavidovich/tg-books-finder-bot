@@ -2,10 +2,12 @@ import crypto from "crypto";
 import { Markup } from "telegraf";
 import { config } from "../config.js";
 import { norm, scoreMatch, shortTitle } from "./matching.js";
+import { buildFlibustaAttemptsFromQuery } from "./flibustaAttempts.js";
 import { replyChunked } from "./telegramUtils.js";
 import { isDebugAllowed, getUserId } from "../access/accessControl.js";
 import { searchBooks, searchByAuthor, getBookInfo } from "../providers/flibustaProvider.js";
-import { geminiDebugBookQueryFromText, parseBookQueryResult } from "../geminiTextSearch.js";
+import { extractBookQueryFromText } from "../llm/bookExtraction.js";
+import { formatLlmSteps } from "../llm/debug.js";
 import { findBooksByQuery } from "../googleBooks.js";
 import { createBoundedCache } from "./cache.js";
 
@@ -22,63 +24,6 @@ function formatFlibustaList(list, limit = 5) {
       return `${i + 1}) ${id} | ${t}${a ? `, ${a}` : ""}`;
     })
     .join("\n");
-}
-
-// Universal attempt builder for a Gemini text-search query result.
-// Includes the title_ru/author_ru enrichment fields (mirroring
-// buildFlibustaAttemptsFromVisionItem below) since Gemini sometimes answers
-// in English for a famous work (e.g. "We" / "Yevgeny Zamyatin" for "Замятин
-// Мы"), which a Russian-only catalog like Flibusta won't match at all.
-export function buildFlibustaAttemptsFromQuery(q, input) {
-  const attempts = [];
-  const add = (title, author = null) => {
-    const t = String(title || "").trim();
-    const a = String(author || "").trim();
-    if (!t) return;
-    attempts.push({ title: t, author: a || null });
-  };
-
-  if (q?.title_ru) add(q.title_ru, q.author_ru || q.author || null);
-  if (q?.title) add(q.title, q.author || null);
-  if (q?.title) add(q.title, null);
-  if (q?.query) add(q.query, null);
-  if (input) add(input, null);
-
-  return dedupAttempts(attempts);
-}
-
-// Uses the Gemini Vision enrichment fields (title_ru/author_ru, variants)
-// that were previously computed and thrown away - see P0-1 in
-// PRIORITIZED_FINDINGS.md. Each variant gets its own Flibusta attempt so the
-// cross-script (EN cover -> RU catalog) matching the enrichment step exists
-// for actually gets used.
-export function buildFlibustaAttemptsFromVisionItem(item) {
-  const attempts = [];
-  const add = (title, author = null) => {
-    const t = String(title || "").trim();
-    const a = String(author || "").trim();
-    if (!t) return;
-    attempts.push({ title: t, author: a || null });
-  };
-
-  add(item?.title, item?.author);
-  add(item?.title_ru, item?.author_ru);
-  add(item?.title_en, item?.author_en);
-  for (const v of Array.isArray(item?.variants) ? item.variants : []) add(v, null);
-
-  return dedupAttempts(attempts);
-}
-
-function dedupAttempts(attempts) {
-  const seen = new Set();
-  const uniq = [];
-  for (const a of attempts) {
-    const key = `${norm(a.title)}|${norm(a.author || "")}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    uniq.push(a);
-  }
-  return uniq;
 }
 
 // Searches Flibusta for one title/author attempt and returns every
@@ -226,27 +171,16 @@ export async function fetchFlibustaResultForCandidate(candidate) {
 }
 
 export async function handleFindQuery({ ctx, input, db, cache }) {
-  // Fetch Gemini exactly once and reuse it for both the debug preview and
-  // the actual parsed query - two independent calls aren't guaranteed to
-  // agree (Gemini 2.5 Flash's "thinking" adds variance even at temperature
-  // 0), which previously let the debug preview show one answer while a
-  // second, separate call silently returned a different one for the search.
-  const raw = await geminiDebugBookQueryFromText(input);
+  // One LLM call, reused for both the debug preview and the search - two
+  // independent calls aren't guaranteed to agree (model "thinking" adds
+  // variance even at temperature 0), which previously let the debug preview
+  // show one answer while the search silently used a different one.
+  const { query: q, llm } = await extractBookQueryFromText(input);
 
   if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
-    const bodyPreview = String(raw?.rawBody || "").slice(0, 2000);
-    const candPreview = String(raw?.candidateText || "").slice(0, 2000);
-    const infoText =
-      `GEMINI DEBUG\n` +
-      `finishReason: ${raw?.finishReason || "-"}\n` +
-      `status: ${raw?.status ?? "-"}\n\n` +
-      `candidateText:\n${candPreview || "(empty)"}\n\n` +
-      `rawBody preview:\n${bodyPreview || "(empty)"}`;
-
-    await replyChunked(ctx, infoText);
+    await replyChunked(ctx, formatLlmSteps(llm, { withText: true }));
   }
 
-  const q = parseBookQueryResult(raw);
   const conf = Number(q?.confidence ?? 0) || 0;
 
   if (!q?.query) {
@@ -256,7 +190,7 @@ export async function handleFindQuery({ ctx, input, db, cache }) {
     return;
   }
 
-  if (conf < 0.25) {
+  if (conf < config.TEXT_LOW_CONFIDENCE) {
     await ctx.reply(`Уверенность низкая (${conf.toFixed(2)}), но я всё равно попробую поискать.`, {
       message_thread_id: ctx.message?.message_thread_id,
     });

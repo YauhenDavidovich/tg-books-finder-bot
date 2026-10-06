@@ -26,6 +26,29 @@ export const config = {
   MAX_TG_LEN: 3800,
   FLIBUSTA_BASE_URL: (process.env.FLIBUSTA_BASE_URL || "https://flibusta.is").replace(/\/+$/, ""),
 
+  // LLM routing - see src/llm/client.js. Without LLM_BASE_URL/LLM_API_KEY
+  // the default provider uses direct Gemini only.
+  LLM_PROVIDER: process.env.LLM_PROVIDER || "freellmapi_with_fallback",
+  LLM_BASE_URL: process.env.LLM_BASE_URL || "",
+  LLM_API_KEY: process.env.LLM_API_KEY || "",
+  LLM_MODEL: process.env.LLM_MODEL || "auto",
+  LLM_VISION_MODEL: process.env.LLM_VISION_MODEL || "auto",
+  // Separate budgets: vision on Gemini 3.5 Flash has taken up to ~16s.
+  LLM_TIMEOUT_MS: Number(process.env.LLM_TIMEOUT_MS || 12000),
+  LLM_VISION_TIMEOUT_MS: Number(process.env.LLM_VISION_TIMEOUT_MS || 25000),
+  // json_schema lets the router enforce the shape natively on Gemini models
+  // (and downgrade it per provider); json_object is the fallback knob if
+  // json_schema turns out to trip up the free models in the chain.
+  LLM_JSON_MODE: process.env.LLM_JSON_MODE || "json_schema",
+  // Router-only: thinking effort for the cover steps (V1/V2). Empty = don't send.
+  LLM_COVER_REASONING_EFFORT: process.env.LLM_COVER_REASONING_EFFORT ?? "minimal",
+  LLM_DEBUG: process.env.LLM_DEBUG === "1",
+
+  // Below this, a cover read is rejected ("Не уверен в названии").
+  PHOTO_MIN_CONFIDENCE: Number(process.env.PHOTO_MIN_CONFIDENCE || 0.65),
+  // Below this, text search warns about low confidence but still searches.
+  TEXT_LOW_CONFIDENCE: Number(process.env.TEXT_LOW_CONFIDENCE || 0.25),
+
   RAW_MODE: process.env.RAW_MODE === "1",
   FLIBUSTA_DEBUG: process.env.FLIBUSTA_DEBUG === "1",
   GEMINI_DEBUG: process.env.GEMINI_DEBUG === "1",

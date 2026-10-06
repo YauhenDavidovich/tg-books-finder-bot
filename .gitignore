@@ -4,3 +4,9 @@ node_modules
 service-account.json
 data/
 .DS_Store
+# Local cover photos for LLM smoke/comparison runs (not committed)
+fixtures/*.jpg
+fixtures/*.jpeg
+fixtures/*.png
+fixtures/*.webp
+fixtures/expected.json
