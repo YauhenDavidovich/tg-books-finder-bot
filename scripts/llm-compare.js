@@ -77,7 +77,8 @@ const inputs = [
 ];
 
 const firstLine = (err) => String(err?.message || err).split("\n")[0].slice(0, 300);
-const stepModels = (steps) =>
+// On the router side, "→gemini" marks steps the fallback ended up answering.
+const stepModels = (steps, side = "router") =>
   (steps || [])
     .map((s) => {
       if (s.error) return `${s.step}: ✗ ${s.error.slice(0, 80)}`;
@@ -86,7 +87,7 @@ const stepModels = (steps) =>
         attempts.length > 1 ? `${attempts.length} tries` : null,
         s.via === "direct" ? attempts.at(-1)?.fallbackReason?.slice(0, 60) : null,
       ].filter(Boolean);
-      const via = s.via === "direct" ? `→gemini ${s.model}` : s.model;
+      const via = s.via === "direct" && side === "router" ? `→gemini ${s.model}` : s.model;
       return `${s.step}: ${via} ${s.latencyMs}ms${notes.length ? ` (${notes.join("; ")})` : ""}`;
     })
     .join(", ");
@@ -185,7 +186,7 @@ for (const [i, input] of inputs.entries()) {
     r.warnings = [...warnings];
     row[side] = r;
 
-    console.log(`  ${side.padEnd(6)} ${(r.ms / 1000).toFixed(1)}s  ${stepModels(r.steps)}`);
+    console.log(`  ${side.padEnd(6)} ${(r.ms / 1000).toFixed(1)}s  ${stepModels(r.steps, side)}`);
     if (r.error) console.log(`         ✗ ${r.error}`);
     else console.log(`         read: ${fmtRead(r.read)}${r.rejected ? `  -> ${r.rejected}` : ""}`);
     for (const w of r.warnings) console.log(`         ! ${w.slice(0, 200)}`);
