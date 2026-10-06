@@ -5,6 +5,7 @@ import { isValidKindleEmail, setKindleEmail } from "../kindle/kindleEmail.js";
 import { pendingFind, pendingKindle } from "./pendingState.js";
 import { enforceDailyLimit } from "./dailyLimit.js";
 import { handleFindQuery } from "../core/findFlow.js";
+import { withSearchLog, SEARCH_ERRORS } from "../core/searchLog.js";
 
 export function registerTextHandler(bot, db, cache) {
   bot.on("text", async (ctx) => {
@@ -49,8 +50,10 @@ export function registerTextHandler(bot, db, cache) {
       }
 
       if (userId) pendingFind.delete(userId);
-      if (!(await enforceDailyLimit(ctx, db))) return;
-      await handleFindQuery({ ctx, input: text, db, cache });
+      await withSearchLog({ ctx, db, kind: "text" }, async (search) => {
+        if (!(await enforceDailyLimit(ctx, db))) return search.fail(SEARCH_ERRORS.LIMIT);
+        await handleFindQuery({ ctx, input: text, db, cache, search });
+      });
     } catch (e) {
       console.error(e);
       const msg = String(e?.message || e).slice(0, 1600);

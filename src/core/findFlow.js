@@ -10,6 +10,7 @@ import { extractBookQueryFromText } from "../llm/bookExtraction.js";
 import { formatLlmSteps } from "../llm/debug.js";
 import { findBooksByQuery } from "../googleBooks.js";
 import { createBoundedCache } from "./cache.js";
+import { SEARCH_ERRORS } from "./searchLog.js";
 
 const MAX_CANDIDATES = 5;
 
@@ -170,12 +171,13 @@ export async function fetchFlibustaResultForCandidate(candidate) {
   return { book: candidate.book, info, score: candidate.score };
 }
 
-export async function handleFindQuery({ ctx, input, db, cache }) {
+// `search` is the search_log recorder from withSearchLog (core/searchLog.js).
+export async function handleFindQuery({ ctx, input, db, cache, search }) {
   // One LLM call, reused for both the debug preview and the search - two
   // independent calls aren't guaranteed to agree (model "thinking" adds
   // variance even at temperature 0), which previously let the debug preview
   // show one answer while the search silently used a different one.
-  const { query: q, llm } = await extractBookQueryFromText(input);
+  const { query: q, llm } = await search.llm(extractBookQueryFromText(input));
 
   if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
     await replyChunked(ctx, formatLlmSteps(llm, { withText: true }));
@@ -187,7 +189,7 @@ export async function handleFindQuery({ ctx, input, db, cache }) {
     await ctx.reply("Мало деталей. Добавь 2–3 штуки: страна, время, профессия героя, конфликт, жанр.", {
       message_thread_id: ctx.message?.message_thread_id,
     });
-    return;
+    return search.fail(SEARCH_ERRORS.NO_DETAILS);
   }
 
   if (conf < config.TEXT_LOW_CONFIDENCE) {
@@ -218,9 +220,10 @@ export async function handleFindQuery({ ctx, input, db, cache }) {
     return;
   }
 
-  await runGoogleBooksFallback(ctx, q);
+  if (!(await runGoogleBooksFallback(ctx, q))) search.fail(SEARCH_ERRORS.NOT_FOUND);
 }
 
+// → true if Google Books had something.
 async function runGoogleBooksFallback(ctx, q) {
   const parts = [];
   if (q.title) parts.push(`intitle:"${q.title}"`);
@@ -234,7 +237,7 @@ async function runGoogleBooksFallback(ctx, q) {
     await ctx.reply(`Не нашёл по запросу: ${q.query}\nПопробуй: больше деталей или имя автора.`, {
       message_thread_id: ctx.message?.message_thread_id,
     });
-    return;
+    return false;
   }
 
   const top = results[0];
@@ -247,4 +250,5 @@ async function runGoogleBooksFallback(ctx, q) {
     ...extra,
     message_thread_id: ctx.message?.message_thread_id,
   });
+  return true;
 }

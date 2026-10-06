@@ -13,6 +13,7 @@ import { testDelivery } from "../kindle/kindleSender.js";
 import { pendingFind, pendingKindle } from "./pendingState.js";
 import { handleFindQuery } from "../core/findFlow.js";
 import { enforceDailyLimit } from "./dailyLimit.js";
+import { withSearchLog, SEARCH_ERRORS } from "../core/searchLog.js";
 
 export function registerCommands(bot, db, cache) {
   bot.start(async (ctx) => {
@@ -72,8 +73,10 @@ export function registerCommands(bot, db, cache) {
         return;
       }
 
-      if (!(await enforceDailyLimit(ctx, db))) return;
-      await handleFindQuery({ ctx, input, db, cache });
+      await withSearchLog({ ctx, db, kind: "text" }, async (search) => {
+        if (!(await enforceDailyLimit(ctx, db))) return search.fail(SEARCH_ERRORS.LIMIT);
+        await handleFindQuery({ ctx, input, db, cache, search });
+      });
     } catch (e) {
       console.error(e);
       const msg = String(e?.message || e).slice(0, 1600);
