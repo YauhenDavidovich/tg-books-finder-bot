@@ -49,6 +49,11 @@ async function geminiCallJsonImage({ apiKey, prompt, b64, mimeType, maxOutputTok
       generationConfig: {
         temperature: 0,
         maxOutputTokens,
+        // gemini-2.5-flash thinks by default and its thinking tokens count
+        // against maxOutputTokens: with 320/260 it spent ~300/~250 tokens
+        // thinking and cut the JSON off (MAX_TOKENS). Reading a cover
+        // doesn't need thinking.
+        thinkingConfig: { thinkingBudget: 0 },
         ...(schema ? { responseMimeType: "application/json", responseSchema: schema } : {}),
       },
     }),
