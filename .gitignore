@@ -9,3 +9,4 @@ fixtures/*.jpg
 fixtures/*.jpeg
 fixtures/*.png
 fixtures/*.webp
+fixtures/expected.json
