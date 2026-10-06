@@ -53,6 +53,7 @@ const sides = {
     baseURL: config.LLM_BASE_URL,
     apiKey: config.LLM_API_KEY,
     model: config.LLM_MODEL,
+    lightModel: config.LLM_LIGHT_MODEL,
     visionModel: config.LLM_VISION_MODEL,
     timeoutMs: config.LLM_TIMEOUT_MS,
     visionTimeoutMs: config.LLM_VISION_TIMEOUT_MS,
@@ -172,7 +173,7 @@ function correctness(side, expect) {
 }
 
 const results = [];
-console.log(`router side: ${routerProvider}, text timeout ${config.LLM_TIMEOUT_MS}ms, vision timeout ${config.LLM_VISION_TIMEOUT_MS}ms`);
+console.log(`router side: ${routerProvider}, models ${config.LLM_MODEL} / light ${config.LLM_LIGHT_MODEL} / vision ${config.LLM_VISION_MODEL}, text timeout ${config.LLM_TIMEOUT_MS}ms, vision timeout ${config.LLM_VISION_TIMEOUT_MS}ms`);
 
 for (const [i, input] of inputs.entries()) {
   if (input.kind === "cover") input.image = loadAsTelegramPhoto(input.file);

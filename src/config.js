@@ -33,6 +33,9 @@ export const config = {
   LLM_API_KEY: process.env.LLM_API_KEY || "",
   LLM_MODEL: process.env.LLM_MODEL || "auto",
   LLM_VISION_MODEL: process.env.LLM_VISION_MODEL || "auto",
+  // V2 enrich on the router (a short text call) - e.g. a profile without
+  // Gemini models, so it doesn't spend Gemini's daily request quota.
+  LLM_LIGHT_MODEL: process.env.LLM_LIGHT_MODEL || process.env.LLM_MODEL || "auto",
   // Separate budgets: vision on Gemini 3.5 Flash has taken up to ~16s.
   LLM_TIMEOUT_MS: Number(process.env.LLM_TIMEOUT_MS || 12000),
   LLM_VISION_TIMEOUT_MS: Number(process.env.LLM_VISION_TIMEOUT_MS || 25000),

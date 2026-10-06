@@ -28,7 +28,7 @@ function routerHost() {
 }
 
 console.log(
-  `provider=${config.LLM_PROVIDER} router=${routerHost()} model=${config.LLM_MODEL} ` +
+  `provider=${config.LLM_PROVIDER} router=${routerHost()} model=${config.LLM_MODEL} light_model=${config.LLM_LIGHT_MODEL} ` +
     `vision_model=${config.LLM_VISION_MODEL} json_mode=${config.LLM_JSON_MODE} ` +
     `LLM_API_KEY=${config.LLM_API_KEY ? "set" : "MISSING"} GEMINI_API_KEY=${process.env.GEMINI_API_KEY ? "set" : "MISSING"}\n`
 );

@@ -38,9 +38,9 @@ function directLlm(geminiAnswers) {
   return { llm, requests };
 }
 
-function routerLlm(router, directAnswer = "{}") {
+function routerLlm(router, directAnswer = "{}", extra = {}) {
   const calls = [];
-  const llm = createLlm({ baseURL: router.baseURL, apiKey: "k", visionModel: "auto:vision", logger: silentLogger });
+  const llm = createLlm({ baseURL: router.baseURL, apiKey: "k", visionModel: "auto:vision", logger: silentLogger, ...extra });
   llm.setDirectFallback({
     text: async (prompt, opts) => {
       calls.push({ kind: "text", prompt, opts });
@@ -131,6 +131,19 @@ test("V1 router is vision with minimal reasoning; V2 router is text-only, image 
   assert.equal(v2.reasoning_effort, "minimal");
   assert.equal(typeof v2.messages.at(-1).content, "string", "no image on the router for V2");
   assert.match(v2.messages.at(-1).content, /"title":"We","author":"Yevgeny Zamyatin"/);
+});
+
+test("V2 router goes to LLM_LIGHT_MODEL without reasoning_effort; V1 is unchanged", async (t) => {
+  const router = await startRouter((body, n) => completion(JSON.stringify(ref.cover.responses[n - 1])));
+  t.after(router.close);
+  const { llm } = routerLlm(router, "{}", { lightModel: "auto:text-light" });
+
+  const result = await extractBookFromImage(imageBuffer(), ref.cover.mimeType, { llm });
+  assert.deepEqual(result.items, ref.cover.result.items);
+
+  const [v1, v2] = router.requests;
+  assert.deepEqual([v1.model, v1.reasoning_effort], ["auto:vision", "minimal"]);
+  assert.deepEqual([v2.model, v2.reasoning_effort], ["auto:text-light", undefined]);
 });
 
 test("V2 router down -> Gemini gets the enrich prompt with the image", async (t) => {

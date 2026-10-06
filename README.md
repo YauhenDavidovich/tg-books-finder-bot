@@ -124,7 +124,7 @@ npm test
 |---|---|---|
 | Текстовый поиск (T1) | `chatJson` | `LLM_MODEL` |
 | Чтение обложки (V1) | `visionJson`, `reasoning_effort: minimal` | `LLM_VISION_MODEL` |
-| RU/EN-варианты (V2) | `chatJson` без картинки на роутере; Gemini получает картинку, как раньше | `LLM_MODEL` |
+| RU/EN-варианты (V2) | `chatJson` без картинки на роутере; Gemini получает картинку, как раньше | `LLM_LIGHT_MODEL` (по умолчанию = `LLM_MODEL`) |
 
 **Когда уходим на Gemini** (в режиме `freellmapi_with_fallback`):
 - сеть или таймаут (`LLM_TIMEOUT_MS` для текста, `LLM_VISION_TIMEOUT_MS` для картинок);
@@ -140,7 +140,9 @@ npm test
 | `freellmapi` | только роутер, без фолбэка; с битым конфигом бот не стартует |
 | `direct` | только Gemini |
 
-Остальные переменные (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_VISION_MODEL`, таймауты, `LLM_JSON_MODE`, `LLM_COVER_REASONING_EFFORT`, пороги `PHOTO_MIN_CONFIDENCE`/`TEXT_LOW_CONFIDENCE`) описаны в `.env.example`.
+`LLM_LIGHT_MODEL` нужен, чтобы V2 не тратил дневную квоту Gemini: укажи профиль без моделей Gemini (Groq/OpenRouter). Такому профилю бот не шлёт `reasoning_effort`: `minimal` выключает thinking только у Gemini, а Groq это значение не принимает ни у одной модели.
+
+Остальные переменные (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_LIGHT_MODEL`, `LLM_VISION_MODEL`, таймауты, `LLM_JSON_MODE`, `LLM_COVER_REASONING_EFFORT`, пороги `PHOTO_MIN_CONFIDENCE`/`TEXT_LOW_CONFIDENCE`) описаны в `.env.example`.
 
 **Логи** (всегда): переход на Gemini с причиной, непригодный JSON вместе с моделью, которая его вернула, открытие предохранителя. Подробнее — `GEMINI_DEBUG` и `LLM_DEBUG` (см. п.7).
 
