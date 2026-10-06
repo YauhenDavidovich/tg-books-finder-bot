@@ -246,6 +246,9 @@ export async function extractBookFromImage(imageBuffer, mimeType = "image/jpeg",
     reasoningEffort,
     geminiSchema: COVER_GEMINI_SCHEMA,
     geminiMaxTokens: 320,
+    // Gemini's default thinking ate ~300 of these 320 tokens and cut the
+    // JSON off (MAX_TOKENS) - same knob as reasoningEffort on the router.
+    geminiThinkingBudget: 0,
   });
   steps.push(llmStep("cover", r1));
 
@@ -298,6 +301,7 @@ export async function extractBookFromImage(imageBuffer, mimeType = "image/jpeg",
       reasoningEffort,
       geminiSchema: ENRICH_GEMINI_SCHEMA,
       geminiMaxTokens: 260,
+      geminiThinkingBudget: 0,
       directImage: { base64: b64, mimeType },
     });
     steps.push(llmStep("enrich", r2));

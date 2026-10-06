@@ -1,5 +1,5 @@
 {
-  "_note": "Captured from the pre-FreeLLMAPI geminiTextSearch.js/geminiVision.js (commit e22603b) with mocked Gemini responses.",
+  "_note": "Captured from the pre-FreeLLMAPI geminiTextSearch.js/geminiVision.js (main at 6bd2b2d, with the cover thinking fix) with mocked Gemini responses.",
   "text": {
     "input": "антиутопия про стеклянный город и нумера, автор вроде Замятин",
     "response": {
@@ -131,6 +131,9 @@
         "generationConfig": {
           "temperature": 0,
           "maxOutputTokens": 320,
+          "thinkingConfig": {
+            "thinkingBudget": 0
+          },
           "responseMimeType": "application/json",
           "responseSchema": {
             "type": "OBJECT",
@@ -197,6 +200,9 @@
         "generationConfig": {
           "temperature": 0,
           "maxOutputTokens": 260,
+          "thinkingConfig": {
+            "thinkingBudget": 0
+          },
           "responseMimeType": "application/json",
           "responseSchema": {
             "type": "OBJECT",
@@ -287,6 +293,9 @@
         "generationConfig": {
           "temperature": 0,
           "maxOutputTokens": 320,
+          "thinkingConfig": {
+            "thinkingBudget": 0
+          },
           "responseMimeType": "application/json",
           "responseSchema": {
             "type": "OBJECT",

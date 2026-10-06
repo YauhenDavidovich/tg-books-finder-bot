@@ -47,6 +47,15 @@ test("vision call sends text then inline image", async () => {
   assert.deepEqual(calls[0].body.generationConfig, { temperature: 0, maxOutputTokens: 320 });
 });
 
+test("thinking budget is sent only when given (0 turns thinking off)", async () => {
+  mockFetch(200, geminiAnswer("{}"));
+  await geminiVision("QUJD", "image/jpeg", "read", { geminiMaxTokens: 320, geminiThinkingBudget: 0 });
+  await geminiText("q", { geminiMaxTokens: 1024 });
+
+  assert.deepEqual(calls[0].body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
+  assert.equal(calls[1].body.generationConfig.thinkingConfig, undefined);
+});
+
 test("without a schema the system prompt goes in as systemInstruction", async () => {
   mockFetch(200, geminiAnswer("hi"));
   await geminiText("q", { system: "be brief" });

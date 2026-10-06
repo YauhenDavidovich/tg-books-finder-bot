@@ -14,7 +14,7 @@ function readAllParts(parts) {
     .trim();
 }
 
-async function generateContent(parts, { system, geminiSchema, geminiMaxTokens } = {}) {
+async function generateContent(parts, { system, geminiSchema, geminiMaxTokens, geminiThinkingBudget } = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
 
@@ -33,6 +33,9 @@ async function generateContent(parts, { system, geminiSchema, geminiMaxTokens } 
       generationConfig: {
         temperature: 0,
         ...(geminiMaxTokens ? { maxOutputTokens: geminiMaxTokens } : {}),
+        // gemini-2.5-flash thinks by default, and thinking tokens count
+        // against maxOutputTokens - small budgets need it off (0).
+        ...(geminiThinkingBudget !== undefined ? { thinkingConfig: { thinkingBudget: geminiThinkingBudget } } : {}),
         ...(geminiSchema ? { responseMimeType: "application/json", responseSchema: geminiSchema } : {}),
       },
     }),
