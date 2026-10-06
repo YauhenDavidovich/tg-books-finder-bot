@@ -101,14 +101,14 @@ test("broken LLM_BASE_URL -> answered by direct Gemini, reason logged", async ()
   assert.ok(logger.lines.some((l) => /text -> direct Gemini: router unreachable/.test(l)));
 });
 
-test("429/500/502/503/504 fall back to direct", async (t) => {
-  for (const status of [429, 500, 502, 503, 504]) {
+test("401/403/404/429/5xx fall back to direct, config errors with a hint", async (t) => {
+  for (const status of [401, 403, 404, 429, 500, 502, 503, 504]) {
     const router = await startRouter(() => failure(status));
     t.after(router.close);
     const { llm } = makeLlm(router.baseURL);
     const r = await llm.chat("q");
     assert.equal(r.via, "direct", `status ${status}`);
-    assert.equal(r.fallbackReason, `router ${status}: upstream failed`);
+    assert.match(r.fallbackReason, new RegExp(`^router ${status}: upstream failed`));
   }
 });
 
@@ -253,9 +253,61 @@ test("LLM_PROVIDER=freellmapi never falls back", async (t) => {
   assert.equal(direct.calls.length, 0);
 });
 
+test("router config errors carry a hint in the fallback reason", async (t) => {
+  const router = await startRouter(() => failure(401, "Invalid API key"));
+  t.after(router.close);
+  const { llm, logger } = makeLlm(router.baseURL);
+
+  const r = await llm.chat("q");
+  assert.equal(r.fallbackReason, "router 401: Invalid API key (check LLM_API_KEY)");
+  assert.ok(logger.lines.some((l) => l.includes("router 401: Invalid API key (check LLM_API_KEY)")));
+});
+
+test("a non-API 200 (dashboard HTML, no /v1) is a router failure: no retries, straight to direct", async (t) => {
+  const router = await startRouter(() => ({ html: "<!doctype html><html>dashboard</html>" }));
+  t.after(router.close);
+  const { llm, direct, logger } = makeLlm(router.baseURL);
+
+  const r = await llm.chatJson("q", { schema: TitleSchema });
+  assert.equal(r.via, "direct");
+  assert.deepEqual(r.data, { title: "from-gemini" });
+  assert.match(r.fallbackReason, /non-API response \(text\/html; charset=utf-8\) - check that LLM_BASE_URL ends with \/v1/);
+  assert.equal(router.requests.length, 1, "no JSON retries against a page that isn't the API");
+  assert.equal(r.attempts.length, 1);
+  assert.equal(direct.calls.length, 1);
+
+  await llm.chat("again");
+  assert.ok(logger.lines.some((l) => /router failed 2 times in a row/.test(l)), "counts toward the breaker");
+});
+
+test("startup check: invalid or scheme-less LLM_BASE_URL -> direct only, with a warning", async () => {
+  for (const baseURL of ["freellmapi-production-1395.up.railway.app", "localhost:3001/v1"]) {
+    const { llm, direct, logger } = makeLlm(baseURL);
+    const r = await llm.chat("q");
+    assert.equal(r.via, "direct", baseURL);
+    assert.equal(r.fallbackReason, "router not configured");
+    assert.equal(direct.calls.length, 1);
+    assert.ok(logger.lines.some((l) => /LLM_BASE_URL (is not a valid URL|must start with http)/.test(l) && l.endsWith("using direct Gemini only")), baseURL);
+  }
+});
+
+test("startup check: a path without /v1 only warns, the router is still used", async (t) => {
+  const router = await startRouter(() => completion("{}"));
+  t.after(router.close);
+  const { llm, logger } = makeLlm(router.baseURL.replace(/\/v1$/, ""));
+
+  await llm.chat("q");
+  assert.equal(router.requests.length, 1);
+  assert.ok(logger.lines.some((l) => l.includes('LLM_BASE_URL path is "/" - FreeLLMAPI serves its API under /v1')));
+});
+
 test("config errors fail fast", () => {
   assert.throws(() => createLlm({ provider: "openai" }), /Unknown LLM_PROVIDER/);
-  assert.throws(() => createLlm({ provider: "freellmapi" }), /requires LLM_BASE_URL/);
+  assert.throws(() => createLlm({ provider: "freellmapi" }), /needs a working router config: LLM_BASE_URL\/LLM_API_KEY not set/);
+  assert.throws(
+    () => createLlm({ provider: "freellmapi", baseURL: "freellmapi.example.com", apiKey: "k" }),
+    /needs a working router config: LLM_BASE_URL is not a valid URL/
+  );
 });
 
 test("default mode without router config uses direct and says so once", async () => {

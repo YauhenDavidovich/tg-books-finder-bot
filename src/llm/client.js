@@ -13,15 +13,32 @@ import { parseJsonLoose } from "./jsonExtract.js";
 
 export const PROVIDERS = ["freellmapi_with_fallback", "freellmapi", "direct"];
 
-// Ответы роутера, означающие «сейчас не могу», а не «плохой запрос»:
-// пул исчерпан (429) или упал сам роутер/провайдер (5xx).
-const ROUTER_DOWN_STATUSES = new Set([429, 500, 502, 503, 504]);
+// Ответы роутера, означающие «роутер недоступен», а не «плохой запрос»:
+// пул исчерпан (429), упал роутер/провайдер (5xx) или роутер настроен
+// неверно - не тот ключ (401/403), не тот хост или путь без /v1 (404).
+const ROUTER_DOWN_STATUSES = new Set([401, 403, 404, 429, 500, 502, 503, 504]);
+
+const CONFIG_HINTS = {
+  401: "check LLM_API_KEY",
+  403: "check LLM_API_KEY",
+  404: "check LLM_BASE_URL (host, /v1) and LLM_MODEL/LLM_VISION_MODEL",
+};
 
 // --- Предохранитель: после 2 падений роутера подряд минуту ходим напрямую ---
 const BREAK_AFTER = 2;
 const COOLDOWN_MS = 60_000;
 
 export const JSON_RULE = "Respond with ONLY a valid JSON object - no explanations, no markdown.";
+
+// HTTP 200, но не chat completion - например, HTML дашборда FreeLLMAPI,
+// когда в LLM_BASE_URL нет /v1. Считается падением роутера, а не ответом
+// модели: иначе на каждый вызов уходили бы ещё два бессмысленных ретрая.
+class RouterResponseError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RouterResponseError";
+  }
+}
 
 export class LlmJsonError extends Error {
   constructor(message, { attempts = [] } = {}) {
@@ -36,7 +53,20 @@ function isConnectionError(err) {
 }
 
 function isRouterDown(err) {
-  return isConnectionError(err) || ROUTER_DOWN_STATUSES.has(err?.status);
+  return isConnectionError(err) || err instanceof RouterResponseError || ROUTER_DOWN_STATUSES.has(err?.status);
+}
+
+// Returns what's wrong with the router settings, or null if they look usable.
+function routerConfigProblem(baseURL, apiKey) {
+  if (!baseURL || !apiKey) return "LLM_BASE_URL/LLM_API_KEY not set";
+  let url;
+  try {
+    url = new URL(baseURL);
+  } catch {
+    return "LLM_BASE_URL is not a valid URL";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return "LLM_BASE_URL must start with http:// or https://";
+  return null;
 }
 
 function describeRouterError(err) {
@@ -45,7 +75,8 @@ function describeRouterError(err) {
   if (err?.status) {
     // The SDK's message already starts with the status ("503 all keys exhausted").
     const detail = String(err.message || "").replace(new RegExp(`^${err.status}\\s*`), "").slice(0, 200);
-    return `router ${err.status}${detail ? `: ${detail}` : ""}`;
+    const hint = CONFIG_HINTS[err.status] ? ` (${CONFIG_HINTS[err.status]})` : "";
+    return `router ${err.status}${detail ? `: ${detail}` : ""}${hint}`;
   }
   return String(err?.message || err);
 }
@@ -87,8 +118,19 @@ export function createLlm({
     throw new Error(`Unknown LLM_PROVIDER "${provider}" (expected: ${PROVIDERS.join(" | ")})`);
   }
 
+  const configProblem = provider === "direct" ? null : routerConfigProblem(baseURL, apiKey);
+  if (configProblem && provider === "freellmapi") {
+    throw new Error(`LLM_PROVIDER=freellmapi needs a working router config: ${configProblem}`);
+  }
+  if (configProblem) logger.warn(`[llm] ${configProblem} - using direct Gemini only`);
+
+  const routerPath = provider === "direct" || configProblem ? null : new URL(baseURL).pathname;
+  if (routerPath !== null && !/\/v1\/?$/.test(routerPath)) {
+    logger.warn(`[llm] LLM_BASE_URL path is "${routerPath}" - FreeLLMAPI serves its API under /v1`);
+  }
+
   const router =
-    provider !== "direct" && baseURL && apiKey
+    provider !== "direct" && !configProblem
       ? new OpenAI({
           baseURL,
           apiKey,
@@ -98,13 +140,6 @@ export function createLlm({
           maxRetries: 0,
         })
       : null;
-
-  if (provider === "freellmapi" && !router) {
-    throw new Error("LLM_PROVIDER=freellmapi requires LLM_BASE_URL and LLM_API_KEY");
-  }
-  if (provider === "freellmapi_with_fallback" && !router) {
-    logger.warn("[llm] LLM_BASE_URL/LLM_API_KEY not set - using direct Gemini only");
-  }
 
   // --- Запасной путь: сюда передаются Gemini-функции из gemini-direct.js ---
   // setDirectFallback({
@@ -166,7 +201,12 @@ export function createLlm({
 
     const t0 = now();
     const { data, response } = await router.chat.completions.create(body).withResponse();
-    const choice = data.choices?.[0];
+    if (!Array.isArray(data?.choices)) {
+      throw new RouterResponseError(
+        `router returned a non-API response (${response.headers.get("content-type") || "no content-type"}) - check that LLM_BASE_URL ends with /v1`
+      );
+    }
+    const choice = data.choices[0];
 
     return {
       text: choice?.message?.content ?? "",

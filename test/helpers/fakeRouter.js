@@ -9,9 +9,10 @@ export async function startRouter(handler) {
     for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw || "{}");
     requests.push(body);
-    const { status = 200, json = {}, headers = {} } = await handler(body, requests.length);
-    res.writeHead(status, { "content-type": "application/json", ...headers });
-    res.end(JSON.stringify(json));
+    // `html` serves a non-API page, like FreeLLMAPI's dashboard outside /v1.
+    const { status = 200, json = {}, html, headers = {} } = await handler(body, requests.length);
+    res.writeHead(status, { "content-type": html !== undefined ? "text/html; charset=utf-8" : "application/json", ...headers });
+    res.end(html !== undefined ? html : JSON.stringify(json));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
