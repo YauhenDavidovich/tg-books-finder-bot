@@ -17,10 +17,12 @@ import { listCoverFixtures, loadAsTelegramPhoto } from "./lib/fixtures.js";
 setDirectFallback({ text: geminiText, vision: geminiVision });
 
 function routerHost() {
+  if (!config.LLM_BASE_URL) return "(not set)";
   try {
     return new URL(config.LLM_BASE_URL).host;
   } catch {
-    return "(not set)";
+    // The value itself isn't printed: a mis-pasted line could hold a key.
+    return `(set but not a valid URL, ${config.LLM_BASE_URL.length} chars)`;
   }
 }
 
