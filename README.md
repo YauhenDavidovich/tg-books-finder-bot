@@ -156,8 +156,32 @@ node scripts/llm-compare.js [--fallback]                  # роутер vs Gemi
 
 Развёртывание FreeLLMAPI на Railway — чек-лист в [`docs/freellmapi-railway.md`](docs/freellmapi-railway.md).
 
+## Статистика поисков
+Каждый поиск, текстом или по фото, записывается одной строкой в таблицу `search_log` (SQLite). Пишутся и поиски владельца, и отказы по дневному лимиту. Текст запроса и фото **не хранятся**.
+
+| Колонка | Что в ней |
+|---|---|
+| `ts` | начало поиска, ISO 8601 UTC |
+| `kind` | `text` / `photo` |
+| `cache_hit` | ответ из кэша по хэшу фото (у текста кэша пока нет, всегда 0) |
+| `via` | `freellmapi` или `direct`; `direct`, если хотя бы один шаг ответил Gemini напрямую; пусто, если LLM не вызывался |
+| `model` | модели шагов через `+` (у фото: обложка + enrich) |
+| `latency_ms` | полное время LLM-части, с ретраями и ожиданием роутера перед фолбэком |
+| `ok`, `error_kind` | `limit`, `no_details`, `low_confidence`, `not_found`, `llm`, `error` |
+| `user_hash` | sha256 от `SEARCH_LOG_SALT` и Telegram id; пусто, пока соль не задана |
+| `is_owner` | поиск владельца |
+
+`ok` описывает первый ответ бота: показал варианты из Флибусты или Google Books (или ответ из кэша). Что пользователь выбрал потом, не пишется.
+
+Отчёт (только чтение базы):
+```bash
+node scripts/usage.js            # последние 30 дней
+node scripts/usage.js --days 7 --db path/to/bot.sqlite3
+```
+На Railway база лежит на volume бота, поэтому скрипт запускается там: `railway ssh -s <сервис бота> node scripts/usage.js`.
+
 ## Хранилище данных
-Доступы, Kindle email и дневные лимиты хранятся в SQLite (`better-sqlite3`, WAL-режим) в файле `bot.sqlite3` внутри `DATA_DIR`.
+Доступы, Kindle email, дневные лимиты и статистика поисков хранятся в SQLite (`better-sqlite3`, WAL-режим) в файле `bot.sqlite3` внутри `DATA_DIR`.
 
 Если бот раньше работал на JSON-файлах (`access.json`/`kindle.json`/`limits.json`), при первом старте на новом коде эти файлы **автоматически** импортируются в SQLite (без ручных действий), а сами файлы переименовываются в `*.json.bak` (не удаляются — на случай отката). Дальнейшие старты миграцию не повторяют.
 

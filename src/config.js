@@ -20,6 +20,9 @@ export const config = {
   LEGACY_LIMITS_FILE: process.env.LIMITS_FILE || path.join(DATA_DIR, "limits.json"),
 
   DAILY_LIMIT: Number(process.env.DAILY_LIMIT || 15),
+  // Salt for search_log.user_hash. Without it user_hash stays NULL: an
+  // unsalted hash of a Telegram id is easy to brute-force back.
+  SEARCH_LOG_SALT: process.env.SEARCH_LOG_SALT || "",
   // Was hardcoded to 0 (i.e. disabled) regardless of env in the previous version.
   ALLOWED_THREAD_ID: Number(process.env.ALLOWED_THREAD_ID || 0),
 

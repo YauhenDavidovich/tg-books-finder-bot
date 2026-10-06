@@ -26,3 +26,22 @@ CREATE TABLE IF NOT EXISTS daily_usage (
 
 CREATE INDEX IF NOT EXISTS idx_daily_usage_day ON daily_usage(day);
 CREATE INDEX IF NOT EXISTS idx_access_requests_user ON access_requests(user_id);
+
+-- One row per search (text or photo): how it was served and how it ended.
+-- Never the query text or the image. user_hash = sha256 of SEARCH_LOG_SALT
+-- and the Telegram id (NULL while the salt isn't set).
+CREATE TABLE IF NOT EXISTS search_log (
+  id         INTEGER PRIMARY KEY,
+  ts         TEXT NOT NULL,               -- ISO 8601 UTC, when the search started
+  kind       TEXT NOT NULL CHECK (kind IN ('text', 'photo')),
+  cache_hit  INTEGER NOT NULL DEFAULT 0,
+  via        TEXT CHECK (via IN ('freellmapi', 'direct')), -- 'direct' if any LLM step was; NULL = no LLM call
+  model      TEXT,                        -- one per LLM step, joined with '+'
+  latency_ms INTEGER,                     -- wall time of the LLM part, retries and fallbacks included
+  ok         INTEGER NOT NULL,
+  error_kind TEXT,                        -- see SEARCH_ERRORS in core/searchLog.js
+  user_hash  TEXT,
+  is_owner   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_log_ts ON search_log(ts);

@@ -9,11 +9,13 @@ import { formatLlmSteps } from "../llm/debug.js";
 import { pickFlibustaCandidates, presentFlibustaCandidates } from "../core/findFlow.js";
 import { buildFlibustaAttemptsFromVisionItem } from "../core/flibustaAttempts.js";
 import { findBookByTitleAuthor } from "../googleBooks.js";
+import { withSearchLog, SEARCH_ERRORS } from "../core/searchLog.js";
 
 function sha256(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
 }
 
+// → true if Google Books confirmed a book.
 async function runGoogleBooksFallback(ctx, bestItem, cache, cacheKey) {
   const guessedTitle = bestItem.title;
   const guessedAuthor = bestItem.author || null;
@@ -24,7 +26,7 @@ async function runGoogleBooksFallback(ctx, bestItem, cache, cacheKey) {
       `Похоже на: ${guessedTitle}${guessedAuthor ? `, ${guessedAuthor}` : ""}\nНе нашёл во Флибусте и не смог подтвердить в Google Books.`,
       { message_thread_id: ctx.message?.message_thread_id }
     );
-    return;
+    return false;
   }
 
   const url =
@@ -45,6 +47,67 @@ async function runGoogleBooksFallback(ctx, bestItem, cache, cacheKey) {
 
   await ctx.reply(msg, { ...extra, message_thread_id: ctx.message?.message_thread_id });
   if (cache && cacheKey != null) cache.set(cacheKey, { text: msg, extra });
+  return true;
+}
+
+async function handlePhotoSearch(ctx, db, cache, search) {
+  if (!(await enforceDailyLimit(ctx, db))) return search.fail(SEARCH_ERRORS.LIMIT);
+
+  const photos = ctx.message.photo;
+  const best = photos[photos.length - 1];
+  const buffer = await downloadTelegramFile(ctx, best.file_id);
+
+  const hash = sha256(buffer);
+  const cached = cache.get(hash);
+  if (cached && !config.RAW_MODE) {
+    search.cacheHit = true;
+    await ctx.reply(cached.text, { ...cached.extra, message_thread_id: ctx.message.message_thread_id });
+    return;
+  }
+
+  // 1) LLM vision: image -> JSON (FreeLLMAPI, or direct Gemini as fallback)
+  const extracted = await search.llm(extractBookFromImage(buffer, "image/jpeg"));
+
+  if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
+    await replyChunked(ctx, formatLlmSteps(extracted.llm));
+  }
+
+  if (config.RAW_MODE && isDebugAllowed(ctx)) {
+    const rawText =
+      `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` +
+      JSON.stringify({ items: extracted.items, llm: extracted.llm.map(({ text, ...meta }) => meta) }, null, 2);
+    await replyChunked(ctx, rawText);
+  }
+
+  const items = Array.isArray(extracted?.items) ? extracted.items : [];
+  const bestItem = items.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0];
+
+  if (!bestItem || !bestItem.title || (bestItem.confidence ?? 0) < config.PHOTO_MIN_CONFIDENCE) {
+    await ctx.reply("Не уверен в названии. Пришли кадр, где обложка крупнее и ровнее.", {
+      message_thread_id: ctx.message.message_thread_id,
+    });
+    return search.fail(SEARCH_ERRORS.LOW_CONFIDENCE);
+  }
+
+  // 2) PRIORITY: Flibusta - try the original title/author plus the
+  // RU/EN enrichment variants (title_ru/author_ru, variants[]) instead
+  // of only the original guess (see P0-1 in PRIORITIZED_FINDINGS.md).
+  const attempts = buildFlibustaAttemptsFromVisionItem(bestItem);
+  const candidates = await pickFlibustaCandidates(ctx, attempts);
+
+  if (candidates.length) {
+    await presentFlibustaCandidates(ctx, {
+      candidates,
+      bestItem,
+      cache,
+      cacheKey: hash,
+      onNone: (ctx2) => runGoogleBooksFallback(ctx2, bestItem, cache, hash),
+    });
+    return;
+  }
+
+  // 3) Fallback: Google Books confirm
+  if (!(await runGoogleBooksFallback(ctx, bestItem, cache, hash))) search.fail(SEARCH_ERRORS.NOT_FOUND);
 }
 
 export function registerPhotoHandler(bot, db, cache) {
@@ -52,62 +115,7 @@ export function registerPhotoHandler(bot, db, cache) {
     try {
       if (!isAllowedTopic(ctx)) return;
       if (!(await ensureAllowedOrRequest(bot, db, ctx))) return;
-      if (!(await enforceDailyLimit(ctx, db))) return;
-
-      const photos = ctx.message.photo;
-      const best = photos[photos.length - 1];
-      const buffer = await downloadTelegramFile(ctx, best.file_id);
-
-      const hash = sha256(buffer);
-      const cached = cache.get(hash);
-      if (cached && !config.RAW_MODE) {
-        await ctx.reply(cached.text, { ...cached.extra, message_thread_id: ctx.message.message_thread_id });
-        return;
-      }
-
-      // 1) LLM vision: image -> JSON (FreeLLMAPI, or direct Gemini as fallback)
-      const extracted = await extractBookFromImage(buffer, "image/jpeg");
-
-      if (config.GEMINI_DEBUG && isDebugAllowed(ctx)) {
-        await replyChunked(ctx, formatLlmSteps(extracted.llm));
-      }
-
-      if (config.RAW_MODE && isDebugAllowed(ctx)) {
-        const rawText =
-          `RAW AI JSON, thread_id=${ctx.message?.message_thread_id ?? "null"}:\n\n` +
-          JSON.stringify({ items: extracted.items, llm: extracted.llm.map(({ text, ...meta }) => meta) }, null, 2);
-        await replyChunked(ctx, rawText);
-      }
-
-      const items = Array.isArray(extracted?.items) ? extracted.items : [];
-      const bestItem = items.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0];
-
-      if (!bestItem || !bestItem.title || (bestItem.confidence ?? 0) < config.PHOTO_MIN_CONFIDENCE) {
-        await ctx.reply("Не уверен в названии. Пришли кадр, где обложка крупнее и ровнее.", {
-          message_thread_id: ctx.message.message_thread_id,
-        });
-        return;
-      }
-
-      // 2) PRIORITY: Flibusta - try the original title/author plus the
-      // RU/EN enrichment variants (title_ru/author_ru, variants[]) instead
-      // of only the original guess (see P0-1 in PRIORITIZED_FINDINGS.md).
-      const attempts = buildFlibustaAttemptsFromVisionItem(bestItem);
-      const candidates = await pickFlibustaCandidates(ctx, attempts);
-
-      if (candidates.length) {
-        await presentFlibustaCandidates(ctx, {
-          candidates,
-          bestItem,
-          cache,
-          cacheKey: hash,
-          onNone: (ctx2) => runGoogleBooksFallback(ctx2, bestItem, cache, hash),
-        });
-        return;
-      }
-
-      // 3) Fallback: Google Books confirm
-      await runGoogleBooksFallback(ctx, bestItem, cache, hash);
+      await withSearchLog({ ctx, db, kind: "photo" }, (search) => handlePhotoSearch(ctx, db, cache, search));
     } catch (e) {
       console.error(e);
 
