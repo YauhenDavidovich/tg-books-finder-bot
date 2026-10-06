@@ -1,9 +1,12 @@
 // Runs the same text queries and fixture covers through FreeLLMAPI and
 // through direct Gemini, then through the bot's Flibusta candidate search,
 // and reports where switching providers changes what the user is offered.
-//   node scripts/llm-compare.js [--texts-only | --covers-only] [--no-flibusta]
-// The router side runs without fallback (LLM_PROVIDER=freellmapi semantics),
-// so router failures show up as failures instead of quietly becoming Gemini.
+//   node scripts/llm-compare.js [--texts-only | --covers-only] [--no-flibusta] [--fallback]
+// By default the router side runs without fallback (LLM_PROVIDER=freellmapi
+// semantics), so router failures show up as failures instead of quietly
+// becoming Gemini. --fallback runs it exactly like the bot in production
+// (freellmapi_with_fallback); steps Gemini ended up answering are marked
+// "→gemini".
 // Optional fixtures/expected.json ({ "<file name>": ["acceptable title", ...] })
 // adds a correctness check for covers; text queries carry their own.
 // Needs Node 20+ (flibusta-api).
@@ -38,6 +41,7 @@ function loadCoverExpectations() {
 
 const args = new Set(process.argv.slice(2));
 const withFlibusta = !args.has("--no-flibusta");
+const routerProvider = args.has("--fallback") ? "freellmapi_with_fallback" : "freellmapi";
 
 const warnings = [];
 const logger = { warn: (m) => warnings.push(m), log() {} };
@@ -45,12 +49,13 @@ const gemini = { text: geminiText, vision: geminiVision };
 
 const sides = {
   router: createLlm({
-    provider: "freellmapi",
+    provider: routerProvider,
     baseURL: config.LLM_BASE_URL,
     apiKey: config.LLM_API_KEY,
     model: config.LLM_MODEL,
     visionModel: config.LLM_VISION_MODEL,
     timeoutMs: config.LLM_TIMEOUT_MS,
+    visionTimeoutMs: config.LLM_VISION_TIMEOUT_MS,
     jsonMode: config.LLM_JSON_MODE,
     logger,
   }),
@@ -73,7 +78,18 @@ const inputs = [
 
 const firstLine = (err) => String(err?.message || err).split("\n")[0].slice(0, 300);
 const stepModels = (steps) =>
-  (steps || []).map((s) => `${s.step}: ${s.error ? `✗ ${s.error.slice(0, 80)}` : `${s.model} ${s.latencyMs}ms`}`).join(", ");
+  (steps || [])
+    .map((s) => {
+      if (s.error) return `${s.step}: ✗ ${s.error.slice(0, 80)}`;
+      const attempts = s.attempts || [];
+      const notes = [
+        attempts.length > 1 ? `${attempts.length} tries` : null,
+        s.via === "direct" ? attempts.at(-1)?.fallbackReason?.slice(0, 60) : null,
+      ].filter(Boolean);
+      const via = s.via === "direct" ? `→gemini ${s.model}` : s.model;
+      return `${s.step}: ${via} ${s.latencyMs}ms${notes.length ? ` (${notes.join("; ")})` : ""}`;
+    })
+    .join(", ");
 
 async function extract(llm, input) {
   const t0 = Date.now();
@@ -155,6 +171,7 @@ function correctness(side, expect) {
 }
 
 const results = [];
+console.log(`router side: ${routerProvider}, text timeout ${config.LLM_TIMEOUT_MS}ms, vision timeout ${config.LLM_VISION_TIMEOUT_MS}ms`);
 
 for (const [i, input] of inputs.entries()) {
   if (input.kind === "cover") input.image = loadAsTelegramPhoto(input.file);
